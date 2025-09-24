@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 from pyquaternion import Quaternion
+from scipy.spatial.transform import Rotation as R
 
 
 class Projector:
@@ -86,12 +87,94 @@ class Projector:
         points_on_cam_coord = points @ transform.T
         return points_on_cam_coord
     
-    def multi_lidar_concat(self, multi_frame_points, poses):
+    def multi_lidar_concat_org(self, multi_frame_points, poses, ref_pose):
         '''
         将多个激光点云拼接成单个点云
         拼接到第一帧中
         '''
-        pass
+        """
+        拼接多帧点云到关键帧
+        直接使用相对变换公式，不构建完整的变换矩阵
+        """
+        # 加载里程计数据
+        
+        # 获取参考帧的位姿
+        ref_position = np.array(ref_pose['translation'])
+        ref_quaternion = np.array(ref_pose['rotation'])
+        ref_rotation = R.from_quat(ref_quaternion).as_matrix()
+        
+        merged_points = []
+        
+        for i, points in enumerate(multi_frame_points):
+            if len(points) == 0:
+                continue
+            
+            # 获取当前帧的位姿
+            current_pose = poses[i]
+            current_position = np.array(current_pose['translation'])
+            current_quaternion = np.array(current_pose['rotation'])
+            current_rotation = R.from_quat(current_quaternion).as_matrix()
+            
+            # 直接计算相对变换（当前坐标系 → 参考坐标系）
+            # 旋转部分: R_current_to_ref = R_ref @ R_current^T
+            R_current_to_ref = ref_rotation.T @ current_rotation
+            
+            # 平移部分: t_current_to_ref = R_ref @ (t_ref - t_current)
+            relative_translation = ref_rotation.T @ (current_position - ref_position)
+            
+            # 直接应用变换到点云
+            # p_ref = R_current_to_ref @ p_current + t_current_to_ref
+            points_ref = (R_current_to_ref @ points.T).T + relative_translation
+            
+            # 添加到合并点云
+            merged_points.append(points_ref)
+
+        merged_points = np.vstack(merged_points)
+
+        return merged_points
+    
+    def multi_lidar_concat(self, multi_frame_points, poses, ref_pose):
+        '''
+        将多个激光点云拼接成单个点云
+        拼接到第一帧中
+        '''
+        # 获取参考帧的位姿
+        ref_position = np.array(ref_pose['translation'])
+        ref_quaternion = np.array(ref_pose['rotation'])
+        # ref_rotation = R.from_quat(ref_quaternion).as_matrix()
+        ref_to_world = self.to_matrix4x4(ref_quaternion, ref_position)
+        
+        merged_points = []
+        points_in_world = []
+        
+        for i, points in enumerate(multi_frame_points):
+            if len(points) == 0:
+                continue
+            
+            # 获取当前帧的位姿
+            current_pose = poses[i]
+            current_position = np.array(current_pose['translation'])
+            current_quaternion = np.array(current_pose['rotation'])
+            # current_rotation = R.from_quat(current_quaternion).as_matrix()
+            cur_to_world = self.to_matrix4x4(current_quaternion, current_position)
+            
+            points_homo = self.to_homo_coord(points)
+            transform_matrix = np.linalg.inv(ref_to_world) @ cur_to_world
+            points_transformed = (points_homo @ transform_matrix.T)[:, :3]
+            # 添加到合并点云
+            merged_points.append(points_transformed)
+
+            p_in_world = (points_homo @ cur_to_world.T)[:, :3]
+            points_in_world.append(p_in_world)
+
+        merged_points = np.vstack(merged_points)
+
+        points_in_world = np.vstack(points_in_world)
+        # np.save(f"points_in_world.npy", points_in_world)
+        # input("press any key to continue...")
+
+        return merged_points
+
 
     def project_points_to_image(self, points_3d):
         points_3d = points_3d[:,:3]
@@ -148,8 +231,8 @@ class Projector:
             valid_mask = (points_xyz[:,2] > 0) & \
                         (points_on_image[:,0] > 0) & (points_on_image[:,0] < image_shape[0]) & \
                         (points_on_image[:,1] > 0) & (points_on_image[:,1] < image_shape[1])
-            points_2d = points_on_image[valid_mask][:,:2]
-        return points_2d, valid_mask
+            points_on_image = points_on_image[valid_mask]
+        return points_on_image, valid_mask
 
 
     def visualize(self, points_2d, original_points=None):

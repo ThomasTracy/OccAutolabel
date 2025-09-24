@@ -8,7 +8,7 @@ import logging
 import chamfer
 import numpy as np
 from tqdm import tqdm
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Rotation as R
 from scipy import ndimage
 import open3d as o3d
 from copy import deepcopy
@@ -175,75 +175,6 @@ class OCCAutolabel:
         mask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE)
         return mask
 
-    def create_transformation_matrix(rotation, translation):
-        """
-        从旋转和平移创建变换矩阵
-        Args:
-            rotation: 旋转（四元数或旋转矩阵）
-            translation: 平移向量
-        Returns:
-            np.array: 4x4变换矩阵
-        """
-        if isinstance(rotation, list) and len(rotation) == 4:
-            # 四元数转换为旋转矩阵
-            rot_matrix = Rotation.from_quat(rotation).as_matrix()
-        elif isinstance(rotation, list) and len(rotation) == 9:
-            # 3x3旋转矩阵
-            rot_matrix = np.array(rotation).reshape(3, 3)
-        else:
-            raise ValueError("Unsupported rotation format")
-        
-        # 创建4x4变换矩阵
-        transformation = np.eye(4)
-        transformation[:3, :3] = rot_matrix
-        transformation[:3, 3] = np.array(translation)
-        
-        return transformation
-
-    def transform_pointcloud(points, transformation_matrix):
-        """
-        使用变换矩阵变换点云
-        Args:
-            points: 点云数据 (N, 3)
-            transformation_matrix: 4x4变换矩阵
-        Returns:
-            np.array: 变换后的点云
-        """
-        # 转换为齐次坐标
-        points_hom = np.ones((points.shape[0], 4))
-        points_hom[:, :3] = points[:, :3]
-        
-        # 应用变换
-        transformed_points = points_hom.dot(transformation_matrix.T)
-        
-        return transformed_points[:, :3]
-
-    # def project_lidar_to_camera(points, lidar_to_camera_matrix, camera_intrinsic):
-    #     """
-    #     将LiDAR点投影到相机坐标系
-    #     Args:
-    #         points: LiDAR点云 (N, 3)
-    #         lidar_to_camera_matrix: LiDAR到相机的变换矩阵
-    #         camera_intrinsic: 相机内参矩阵
-    #     Returns:
-    #         tuple: (图像坐标, 有效掩码)
-    #     """
-    #     # 转换到相机坐标系
-    #     points_cam = transform_pointcloud(points, lidar_to_camera_matrix)
-        
-    #     # 过滤相机后面的点
-    #     valid_mask = points_cam[:, 2] > 0.1
-    #     points_cam_valid = points_cam[valid_mask]
-        
-    #     if len(points_cam_valid) == 0:
-    #         return np.array([]), valid_mask
-        
-    #     # 投影到图像平面
-    #     points_img_hom = points_cam_valid.dot(camera_intrinsic.T)
-    #     points_img = points_img_hom[:, :2] / points_img_hom[:, 2:3]
-        
-    #     return points_img, valid_mask
-
     def assign_semantics_from_masks(self, points, points_img, mask, image_shape):
         """
         根据图像分割mask为点云分配语义标签
@@ -275,100 +206,6 @@ class OCCAutolabel:
         
         return semantics
 
-    def generate_occupancy_grid(self,semantic_points, voxel_size, pc_range, occ_size):
-        """
-        从语义点云生成occupancy网格
-        Args:
-            semantic_points: 语义点云 (N, 4) [x, y, z, semantic]
-            voxel_size: 体素大小
-            pc_range: 点云范围 [x_min, y_min, z_min, x_max, y_max, z_max]
-            occ_size: occupancy网格大小
-        Returns:
-            tuple: (occupancy网格, 语义网格)
-        """
-        # 转换为体素坐标
-        voxel_coords = np.floor((semantic_points[:, :3] - np.array(pc_range[:3])) / voxel_size).astype(int)
-        
-        # 创建网格
-        occupancy_grid = np.zeros(occ_size, dtype=np.uint8)
-        semantic_grid = np.zeros(occ_size, dtype=np.uint8)
-        
-        # 标记被占据的体素
-        valid_mask = (
-            (voxel_coords[:, 0] >= 0) & (voxel_coords[:, 0] < occ_size[0]) &
-            (voxel_coords[:, 1] >= 0) & (voxel_coords[:, 1] < occ_size[1]) &
-            (voxel_coords[:, 2] >= 0) & (voxel_coords[:, 2] < occ_size[2])
-        )
-        
-        valid_coords = voxel_coords[valid_mask]
-        valid_semantics = semantic_points[valid_mask, 3]
-        
-        occupancy_grid[valid_coords[:, 0], valid_coords[:, 1], valid_coords[:, 2]] = 1
-        semantic_grid[valid_coords[:, 0], valid_coords[:, 1], valid_coords[:, 2]] = valid_semantics
-        
-        return occupancy_grid, semantic_grid
-
-    def process_occupancy_grid(self, occupancy_grid, semantic_grid, config):
-        """
-        后处理occupancy网格
-        Args:
-            occupancy_grid: 原始occupancy网格
-            semantic_grid: 原始语义网格
-            config: 配置参数
-        Returns:
-            tuple: 处理后的网格
-        """
-        processed_occupancy = occupancy_grid.copy()
-        processed_semantic = semantic_grid.copy()
-        
-        # 应用形态学操作填充空洞
-        if config.get('fill_holes', True):
-            for z in range(occupancy_grid.shape[2]):
-                slice_2d = occupancy_grid[:, :, z]
-                filled_slice = ndimage.binary_fill_holes(slice_2d)
-                processed_occupancy[:, :, z] = filled_slice.astype(np.uint8)
-        
-        # 应用高斯平滑
-        if config.get('smooth_grid', True):
-            sigma = config.get('smooth_sigma', 0.5)
-            processed_occupancy = ndimage.gaussian_filter(
-                processed_occupancy.astype(float), sigma=sigma
-            )
-            processed_occupancy = (processed_occupancy > 0.3).astype(np.uint8)
-        
-        return processed_occupancy, processed_semantic
-
-    def create_dense_semantic_points(self, occupancy_grid, semantic_grid, voxel_size, pc_range):
-        """
-        从occupancy网格创建密集语义点云
-        Args:
-            occupancy_grid: occupancy网格
-            semantic_grid: 语义网格
-            voxel_size: 体素大小
-            pc_range: 点云范围
-        Returns:
-            np.array: 密集语义点云
-        """
-        # 获取被占据的体素坐标
-        occupied_indices = np.where(occupancy_grid > 0)
-        
-        if len(occupied_indices[0]) == 0:
-            return np.array([])
-        
-        # 转换为世界坐标
-        world_coords = np.stack(occupied_indices, axis=1).astype(float)
-        world_coords[:, 0] = world_coords[:, 0] * voxel_size + pc_range[0]
-        world_coords[:, 1] = world_coords[:, 1] * voxel_size + pc_range[1]
-        world_coords[:, 2] = world_coords[:, 2] * voxel_size + pc_range[2]
-        
-        # 获取对应的语义标签
-        semantics = semantic_grid[occupied_indices].reshape(-1, 1)
-        
-        # 合并坐标和语义
-        dense_semantic_points = np.concatenate([world_coords, semantics], axis=1)
-        
-        return dense_semantic_points
-    
     def create_voxel_occupancy(self, point_cloud):
         if point_cloud.shape[1] < 4:
             self.logger.error("Point cloud does not contain semantic! shape: {}", point_cloud.shape)
@@ -440,7 +277,7 @@ class OCCAutolabel:
         dense_voxels_with_semantic = np.floor(pcd_np).astype(np.int_)
 
         return dense_voxels_with_semantic
-    def process_single_frame(self, timestamp):
+    def process_single_frame(self, timestamp, lidar_points=None):
         """
         处理单个时间戳的数据帧
         Args:
@@ -454,7 +291,8 @@ class OCCAutolabel:
         """
         
         # 加载LiDAR点云
-        lidar_points = self.load_lidar_pointcloud(timestamp, self.config['point_dim'])
+        if lidar_points is None:
+            lidar_points = self.load_lidar_pointcloud(timestamp, self.config['point_dim'])
         
         # 初始化语义点云
         semantic_points = np.zeros((lidar_points.shape[0], 4))
@@ -480,9 +318,12 @@ class OCCAutolabel:
             camera_to_ego_rotation = cam_calib.get('cam2ego_rotation', None)
             camera_to_ego_translation = cam_calib.get('cam2ego_translation', None)
 
-            lidar_calib = self.get_calibration(timestamp,'lidar')
-            lidar_to_ego_rotation = lidar_calib.get('lidar2ego_rotation', None)
-            lidar_to_ego_translation = lidar_calib.get('lidar2ego_translation', None)
+            # 因为之前在多帧点云拼接时已经做过lidar到ego的转换，所以这里直接设为None
+            lidar_to_ego_rotation = None
+            lidar_to_ego_translation = None
+            # lidar_calib = self.get_calibration(timestamp,'lidar')
+            # lidar_to_ego_rotation = lidar_calib.get('lidar2ego_rotation', None)
+            # lidar_to_ego_translation = lidar_calib.get('lidar2ego_translation', None)
 
             # cv2.imread 获取的图片w和h顺序反向
             image_shape = np.zeros(2)
@@ -497,8 +338,6 @@ class OCCAutolabel:
                 lidar_to_ego_rotation=lidar_to_ego_rotation,
                 lidar_to_ego_translation=lidar_to_ego_translation
             )
-
-            np.save("debug.npy",points2d)
 
             # 分配语义标签
             cam_semantics = self.assign_semantics_from_masks(
@@ -519,79 +358,42 @@ class OCCAutolabel:
 
         return semantic_points
     
-    
-    # def generate_occupancy_for_sequence(self, timestamps, data_dirs, calibration_data, label_mapping, config, save_dir):
-    #     """
-    #     为整个序列生成occupancy真值
-    #     Args:
-    #         timestamps: 时间戳列表
-    #         data_dirs: 数据目录字典
-    #         calibration_data: 标定数据
-    #         label_mapping: 标签映射
-    #         config: 配置参数
-    #         save_dir: 保存目录
-    #     """
-    #     # 创建保存目录
-    #     os.makedirs(save_dir, exist_ok=True)
-    #     os.makedirs(os.path.join(save_dir, 'occupancy_grids'), exist_ok=True)
-    #     os.makedirs(os.path.join(save_dir, 'semantic_points'), exist_ok=True)
-        
-    #     # 处理每一帧
-    #     all_world_points = []
-        
-    #     for timestamp in tqdm(timestamps, desc="Processing frames"):
-    #         try:
-    #             frame_result = process_frame(timestamp, data_dirs, calibration_data, label_mapping, config)
-                
-    #             # 保存原始语义点云
-    #             np.save(
-    #                 os.path.join(save_dir, 'semantic_points', f'{timestamp}_semantic.npy'),
-    #                 frame_result['semantic_points']
-    #             )
-                
-    #             # 累积世界坐标系的点云
-    #             if len(frame_result['world_semantic_points']) > 0:
-    #                 all_world_points.append(frame_result['world_semantic_points'])
-                    
-    #         except Exception as e:
-    #             print(f"Error processing frame {timestamp}: {e}")
-    #             continue
-        
-    #     if not all_world_points:
-    #         print("No valid frames processed")
-    #         return
-        
-    #     # 合并所有帧的点云
-    #     combined_points = np.concatenate(all_world_points, axis=0)
-        
-    #     # 生成occupancy网格
-    #     voxel_size = config['voxel_size']
-    #     pc_range = config['pc_range']
-    #     occ_size = config['occ_size']
-        
-    #     occupancy_grid, semantic_grid = generate_occupancy_grid(
-    #         combined_points, voxel_size, pc_range, occ_size
-    #     )
-        
-    #     # 后处理网格
-    #     processed_occupancy, processed_semantic = process_occupancy_grid(
-    #         occupancy_grid, semantic_grid, config
-    #     )
-        
-    #     # 创建密集语义点云
-    #     dense_points = create_dense_semantic_points(
-    #         processed_occupancy, processed_semantic, voxel_size, pc_range
-    #     )
-        
-    #     # 保存结果
-    #     np.save(os.path.join(save_dir, 'occupancy_grid.npy'), processed_occupancy)
-    #     np.save(os.path.join(save_dir, 'semantic_grid.npy'), processed_semantic)
-        
-    #     if len(dense_points) > 0:
-    #         np.save(os.path.join(save_dir, 'dense_semantic_points.npy'), dense_points)
-        
-    #     print(f"Generated occupancy grid with {np.sum(processed_occupancy)} occupied voxels")
+    def process_multi_frame(self, debug_timestamp=None):
+        for i, timestamp in enumerate(self.timestamps):
+            if debug_timestamp is not None and timestamp != debug_timestamp:
+                continue
+            self.logger.info("------------ start processing frame {} ------------".format(timestamp))
+            frame_num = self.config['point_multi_frame_num']
+            selected_poses = []
+            selected_points = []
+            ref_pose = self.get_pose(timestamp)
+            for j in range(frame_num):
+                if (i-j < 0):
+                    break
+                selected_tp = self.timestamps[i-j]
+                selected_poses.append(self.poses[selected_tp])
+                lidar_points = self.load_lidar_pointcloud(selected_tp,self.config['point_dim'])[:,:3]
 
+                # 将点云从lidar坐标系转换到ego坐标系
+                calib = self.get_calibration(selected_tp,'lidar')
+                lidar_to_ego = self.projector.to_matrix4x4(calib['lidar2ego_rotation'],
+                                                        calib['lidar2ego_translation'])
+                lidar_points_homo = self.projector.to_homo_coord(lidar_points)
+                points_on_ego = lidar_points_homo @ lidar_to_ego.T
+                # 去除自车点云
+                mask = (points_on_ego[:, 0] > 3) | (points_on_ego[:, 0] < -1) | \
+                        (points_on_ego[:, 1] > 1) | (points_on_ego[:, 1] < -1)
+                points_on_ego = points_on_ego[mask]
+
+                selected_points.append(points_on_ego[:,:3])
+            
+            selected_points = self.projector.multi_lidar_concat(selected_points, selected_poses, ref_pose)
+            np.save("full_points.npy", selected_points)
+            input("Press Enter to continue...")
+            self.process_single_frame(timestamp, selected_points)
+            return
+
+        return
 
 def main(config_path, data_root, save_path, label_map):
     """

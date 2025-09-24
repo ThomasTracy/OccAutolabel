@@ -56,11 +56,6 @@ def visualize_voxels(voxel_data, colors, voxel_size):
 def visualize_pc_on_image(image_data, projected_points):
     """
     可视化点云投影结果
-    
-    Args:
-        first_frame_data: 第一帧数据字典
-        projected_points: 投影点 (N, 3) [u, v, depth]
-        valid_mask: 有效点掩码 (N,)
     """
     
     # 将PIL图像转换为OpenCV格式
