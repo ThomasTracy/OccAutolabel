@@ -45,8 +45,7 @@ def poisson_rebuild(pcd, depth, n_threads=8, min_density=None):
 
     return mesh, densities
 
-
-class OCCAutolabel:
+class OCCAutolabelBase:
     def __init__(self, data_dirs, config):
         self.data_dirs = data_dirs
         self.config = config
@@ -157,6 +156,11 @@ class OCCAutolabel:
         image = cv2.imread(image_file)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         return image
+
+
+class OCCAutolabelwithMask(OCCAutolabelBase):
+    def __init__(self, data_dirs, config):
+        super().__init__(data_dirs, config)
 
     def load_semantic_mask(self, mask_path, timestamp, camera_name):
         """
@@ -388,15 +392,16 @@ class OCCAutolabel:
                 selected_points.append(points_on_ego[:,:3])
             
             selected_points = self.projector.multi_lidar_concat(selected_points, selected_poses, ref_pose)
-            np.save("full_points.npy", selected_points)
-            input("Press Enter to continue...")
+            # np.save("full_points.npy", selected_points)
+            # input("Press Enter to continue...")
             self.process_single_frame(timestamp, selected_points)
-            return
+            if debug_timestamp is not None:
+                return
 
         return
 
 
-class PointColorGenerator(OCCAutolabel):
+class PointColorGenerator(OCCAutolabelBase):
     def __init__(self, config, data):
         super().__init__(config, data)
 
