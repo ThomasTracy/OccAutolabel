@@ -395,52 +395,148 @@ class OCCAutolabel:
 
         return
 
-def main(config_path, data_root, save_path, label_map):
-    """
-    主函数
-    Args:
-        config_path: 配置文件路径
-        data_root: 数据根目录
-        save_path: 保存路径
-    """
-    # 加载配置
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    # 加载标签映射
-    with open(label_map, 'r') as f:
-        label_mapping = yaml.safe_load(f)
-    
-    # 设置数据目录
-    data_dirs = {
-        'save_path': save_path,
-        'calibration': os.path.join(data_root, 'calibration','calibration.json'),
-        'camera':  os.path.join(data_root, 'camera'),
-        'lidar': os.path.join(data_root, 'lidar'),
-        'mask': os.path.join(data_root, 'masks'),
-        'pose': os.path.join(data_root, 'pose', 'pose.json'),
-        'label_mapping': label_map
-    }
-    autolabel = OCCAutolabel(data_dirs, config)
-    
-    # print(f"Processing {len(selected_timestamps)} frames from {start_idx} to {end_idx}")
-    
-    # 生成occupancy真值
-    semantic_points = autolabel.process_single_frame('1532402927647951')
-    print(semantic_points.shape)
-    print(semantic_points[:10,:])
-    print("--------------- finished ------------------")
 
-if __name__ == '__main__':
-    import argparse
+class PointColorGenerator(OCCAutolabel):
+    def __init__(self, config, data):
+        super().__init__(config, data)
+
+    def assign_color_from_image(self, points, points_img, image, image_shape):
+        """
+        根据图像为点云分配rgb颜色
+        Args:
+            points: 三维点云数据
+            points_img: 投影后的图像坐标
+            image: 图片数据
+            label_mapping: 标签映射字典
+            image_shape: 图像形状
+        Returns:
+            np.array: 语义标签
+        """
+        semantics = np.zeros((points.shape[0], 3), dtype=np.uint8)
+        
+        if len(points_img) == 0:
+            return semantics
+        
+        for i, img_coord in enumerate(points_img):
+            x, y = int(round(img_coord[0])), int(round(img_coord[1]))
+            
+            # 检查点是否在图像范围内
+            if 0 <= x < image_shape[0] and 0 <= y < image_shape[1]:
+                # 从image获取颜色标签
+                semantics[i] = image[y, x]
+        
+        return semantics
+    def process_single_frame(self, timestamp, lidar_points=None):
+        """
+        处理单个时间戳的数据帧
+        Args:
+            timestamp: 时间戳
+            lidar_points: 若
+            calibration_data: 标定数据
+            label_mapping: 标签映射
+            config: 配置参数
+        Returns:
+            dict: 处理结果
+        """
+        
+        # 加载LiDAR点云
+        if lidar_points is None:
+            lidar_points = self.load_lidar_pointcloud(timestamp, self.config['point_dim'])
+        
+        # 初始化语义点云
+        rgb_points = np.zeros((lidar_points.shape[0], 6))
+        rgb_points[:, :3] = lidar_points[:, :3]  # 坐标
+        rgb_points[:, 3:] = 0  # rgb颜色
+        
+        # 处理每个相机
+        camera_names = self.config['camera_types']
+        
+        for cam_name in camera_names:
+            # 检查相机数据是否存在
+            cam_dir = os.path.join(self.data_dirs['camera'], cam_name)
+            if not os.path.exists(cam_dir):
+                continue
+            
+            # 加载图像和mask
+            image = self.load_camera_image(self.data_dirs['camera'], timestamp, cam_name)
+            
+            cam_calib = self.get_calibration(timestamp,cam_name)
+            camera_matrix = cam_calib.get('camera_intrinsic', None)
+            distortion_coeffs = cam_calib.get('distortion_coeffs', None)
+            camera_to_ego_rotation = cam_calib.get('cam2ego_rotation', None)
+            camera_to_ego_translation = cam_calib.get('cam2ego_translation', None)
+
+            # 因为之前在多帧点云拼接时已经做过lidar到ego的转换，所以这里直接设为None
+            lidar_to_ego_rotation = None
+            lidar_to_ego_translation = None
+            # lidar_calib = self.get_calibration(timestamp,'lidar')
+            # lidar_to_ego_rotation = lidar_calib.get('lidar2ego_rotation', None)
+            # lidar_to_ego_translation = lidar_calib.get('lidar2ego_translation', None)
+
+            # cv2.imread 获取的图片w和h顺序反向
+            image_shape = np.zeros(2)
+            image_shape[0], image_shape[1] = image.shape[1], image.shape[0]
+            points2d, valid_mask = self.projector.projection(
+                lidar_points,
+                image_shape=image_shape,
+                camera_matrix=camera_matrix,
+                distortion_coeffs=distortion_coeffs,
+                camera_to_ego_rotation=camera_to_ego_rotation,
+                camera_to_ego_translation=camera_to_ego_translation,
+                lidar_to_ego_rotation=lidar_to_ego_rotation,
+                lidar_to_ego_translation=lidar_to_ego_translation
+            )
+
+            # 分配语义标签
+            cam_rgb = self.assign_color_from_image(
+                lidar_points[valid_mask, :3], 
+                points2d, 
+                image, 
+                image_shape
+            )
+            
+            # 更新语义点云
+            rgb_points[valid_mask, 3:] = cam_rgb
+            save_path = os.path.join(self.data_dirs['save_path'],"{}.npy".format(timestamp))
+            np.save(save_path, rgb_points)
+        self.logger.info("------------ finish processing frame {} ------------".format(timestamp))
+
+        return rgb_points
     
-    parser = argparse.ArgumentParser(description='Generate occupancy ground truth from custom dataset')
-    parser.add_argument('--config', type=str, required=True, help='Path to config file')
-    parser.add_argument('--data_root', type=str, required=True, help='Root directory of dataset')
-    parser.add_argument('--save_path', type=str, required=True, help='Path to save results')
-    parser.add_argument('--label_map', type=str, default=True, help='Label map file')
-    
-    args = parser.parse_args()
-    
-    # 运行主函数
-    main(args.config, args.data_root, args.save_path, args.label_map)
+    def process_multi_frame(self, debug_timestamp=None):
+        for i, timestamp in enumerate(self.timestamps):
+            if debug_timestamp is not None and timestamp != debug_timestamp:
+                continue
+            self.logger.info("------------ start processing frame {} ------------".format(timestamp))
+            frame_num = self.config['point_multi_frame_num']
+            selected_poses = []
+            selected_points = []
+            ref_pose = self.get_pose(timestamp)
+            for j in range(frame_num):
+                if (i-j < 0):
+                    break
+                selected_tp = self.timestamps[i-j]
+                selected_poses.append(self.poses[selected_tp])
+                lidar_points = self.load_lidar_pointcloud(selected_tp,self.config['point_dim'])[:,:3]
+
+                # 将点云从lidar坐标系转换到ego坐标系
+                calib = self.get_calibration(selected_tp,'lidar')
+                lidar_to_ego = self.projector.to_matrix4x4(calib['lidar2ego_rotation'],
+                                                        calib['lidar2ego_translation'])
+                lidar_points_homo = self.projector.to_homo_coord(lidar_points)
+                points_on_ego = lidar_points_homo @ lidar_to_ego.T
+                # 去除自车点云
+                mask = (points_on_ego[:, 0] > 3) | (points_on_ego[:, 0] < -1) | \
+                        (points_on_ego[:, 1] > 1) | (points_on_ego[:, 1] < -1)
+                points_on_ego = points_on_ego[mask]
+
+                selected_points.append(points_on_ego[:,:3])
+            
+            selected_points = self.projector.multi_lidar_concat(selected_points, selected_poses, ref_pose)
+            # np.save("full_points.npy", selected_points)
+            # input("Press Enter to continue...")
+            self.process_single_frame(timestamp, selected_points)
+            if debug_timestamp is not None:
+                return
+
+        return
