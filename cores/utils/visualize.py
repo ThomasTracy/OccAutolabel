@@ -2,6 +2,42 @@ import numpy as np
 import open3d as o3d
 import cv2
 
+def create_voxel_bound_lines(voxel_grid):
+    voxel_size = voxel_grid.voxel_size
+    lines = o3d.geometry.LineSet()
+    vertices = []  # To store all vertices of all voxels
+    lines_indices = [] # To store the connectivity for the lines
+
+    for voxel in voxel_grid.get_voxels():
+        # Get the center coordinate of the voxel
+        center = voxel_grid.get_voxel_center_coordinate(voxel.grid_index)
+
+        # Calculate the 8 vertices of the voxel
+        x, y, z = center
+        dx = dy = dz = voxel_size / 2.0
+        voxel_vertices = np.array([
+            [x - dx, y - dx, z - dx], [x + dx, y - dx, z - dx],
+            [x + dx, y + dx, z - dx], [x - dx, y + dx, z - dx],
+            [x - dx, y - dx, z + dx], [x + dx, y - dx, z + dx],
+            [x + dx, y + dx, z + dx], [x - dx, y + dx, z + dx]
+        ])
+
+        # Add the vertices to the list and record their indices
+        current_vertex_offset = len(vertices)
+        vertices.extend(voxel_vertices)
+
+        # Define the 12 edges of the voxel by connecting the vertices
+        # Example: A cube has 12 edges
+        voxel_lines_indices = np.array([
+            [0, 1], [1, 2], [2, 3], [3, 0], # Bottom face
+            [4, 5], [5, 6], [6, 7], [7, 4], # Top face
+            [0, 4], [1, 5], [2, 6], [3, 7]  # Vertical edges
+        ]) + current_vertex_offset
+        lines_indices.extend(voxel_lines_indices)
+    lines.points = o3d.utility.Vector3dVector(np.array(vertices))
+    lines.lines = o3d.utility.Vector2iVector(np.array(lines_indices))
+    lines.paint_uniform_color([0, 0, 0]) # Color the lines
+    return lines
 
 def visualize_voxels(voxel_data, colors, voxel_size):
     """
@@ -45,9 +81,9 @@ def visualize_voxels(voxel_data, colors, voxel_size):
     
     # 创建体素网格
     voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd, voxel_size=voxel_size)
-    
+    bounding_lines = create_voxel_bound_lines(voxel_grid)
     # 可视化
-    o3d.visualization.draw_geometries([voxel_grid], 
+    o3d.visualization.draw_geometries([voxel_grid,bounding_lines], 
                                      window_name="Voxel Visualization",
                                      width=1200, 
                                      height=800)
@@ -56,6 +92,7 @@ def visualize_voxels(voxel_data, colors, voxel_size):
 def visualize_pc_on_image(image_data, projected_points):
     """
     可视化点云投影结果
+    projected_points: 已经投影到图像上的点
     """
     
     # 将PIL图像转换为OpenCV格式
@@ -94,3 +131,26 @@ def visualize_pc_on_image(image_data, projected_points):
     cv2.imshow('Point Cloud on Image', image)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+
+def visualize_points(points):
+    colors=None
+    if points.shape[1] == 6:
+        # colors=np.concatenate([points[:, 5:6], points[:, 4:5], points[:, 3:4]], axis=1)
+        colors=points[:, 3:6]
+    point_size=2.0
+    window_name="3D Point Cloud"
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points[:, :3])
+
+    # 如果提供了颜色信息
+    if colors is not None:
+        # 确保颜色值在[0, 1]范围内
+        if np.max(colors) > 1.0:
+            colors = colors / 255.0
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+    else:
+        # 默认设置为灰色
+        pcd.colors = o3d.utility.Vector3dVector(np.full((points.shape[0], 3), [0.5, 0.5, 0.5]))
+
+    # 可视化
+    o3d.visualization.draw_geometries([pcd])
