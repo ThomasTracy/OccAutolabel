@@ -1,0 +1,41 @@
+# 'data_root': "/home/jszr/Data/OCC_Autolabel/DATA/TOWN/clip1"
+# 'save_path': "/home/jszr/Data/OCC_Autolabel/DATA/TOWN/clip1/annotations/gt"
+
+'data_root': "/home/robot/data/clip0"
+'save_path': "occ_gt"
+
+'label_map': "/home/robot/Code/Autolabel/occ_autolabel/configs/label_mapping_nuscenes.yaml"
+
+'camera_types': ["CAM_BACK","CAM_BACK_RIGHT","CAM_FRONT_LEFT","CAM_BACK_LEFT","CAM_FRONT","CAM_FRONT_RIGHT"]
+
+'sensor_origin': [0,0,1] # ray cast 判断free unknown时射线发出的起点位置
+
+'start_index': 0
+'end_index': 1
+
+point_dim: 4
+point_multi_frame_num: 10
+multi_frame_radius: 100
+
+valid_voxel_point_threshold: 10
+valid_polygon_voxel_threshold: 2
+
+# 动态物体去噪
+dynamic_denoise_voxel_size: 0.3
+dynamic_denoise_dilate_radius: 2
+dynamic_denoise_ground_z_thresh: 0.4
+
+'downsample': False
+'voxel_size': 0.1
+'rough_voxel_size': 1  # 粗分辨率，用于去噪及聚类动态物体
+
+'ground_mask_grid_size': 0.2  # 用来过滤噪点的BEV栅格大小
+'ground_height_threshold': 0.2  # 地面噪声点的高度阈值
+'std_multiplier': 3  # 过滤高于地面点很多的点的标准差乘数
+
+# 'voxel_range':  [-50, -50, -1, 50, 50, 2] # [-8, -8, -1, 8, 8, 2]
+voxel_range: [-10, -15, -1, 20, 15, 2]
+'ego_range': [-1, -1, 3, 1]   # 扫到自车身上的点云范围 [x_min, y_min, x_max, y_max]
+'blind_floor_range': [-6,-6,-0.1, 6.5, 6, 0.1]  # 盲区地面的范围 [x_min, y_min, z_min, x_max, y_max, z_max]
+
+'debug_mode': False

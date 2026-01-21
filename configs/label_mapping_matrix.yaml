@@ -1,0 +1,14 @@
+label2label:
+  10: 1
+  20: 2
+  30: 3
+  40: 4
+  50: 5
+  255: 0
+label2name:
+  1: 'drive_plane'
+  2: 'drive_stair'
+  3: 'drive_other'
+  4: 'human'
+  5: 'vehicle'
+  0: 'undrivable space'

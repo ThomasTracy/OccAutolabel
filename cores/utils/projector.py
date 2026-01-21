@@ -40,7 +40,12 @@ class Projector:
         '''
         将旋转平移矩阵转换成4x4矩阵
         '''
-        if rotation.shape != (3, 3):
+        # 注意此处输入的四元数是什么顺序，是[w, x, y, z]还是[x, y, z, w]
+        # pyquatanion中，是[w, x, y, z]
+        # scipy.spatial.transform.Rotation.from_quat 中是[x, y, z, w]
+        if rotation.shape == (3,):
+            rotation = R.from_euler('xyz', rotation, degrees=True).as_matrix()
+        elif rotation.shape == (4,):
             rotation = Quaternion(rotation).rotation_matrix
         transformation_matrix = np.eye(4)
         transformation_matrix[:3, :3] = rotation
@@ -64,7 +69,7 @@ class Projector:
                 np.eye(3),
                 np.zeros((3, 1)),
                 self.camera_matrix,
-                self.distortion_coeff
+                self.distortion_coeffs
             )
         else:
             points_on_image = (self.camera_matrix @ points_xyz.T).T     # 通过相机内参将点云投影到成像平面
@@ -133,10 +138,11 @@ class Projector:
 
         return merged_points
     
-    def multi_lidar_concat(self, multi_frame_points, poses, ref_pose):
+    def multi_lidar_concat(self, multi_frame_points, poses, ref_pose, with_semantic=False):
         '''
         将多个激光点云拼接成单个点云
         拼接到第一帧中
+        with_semantic: 是否包含语义信息, 意味着dim=4
         '''
         # 获取参考帧的位姿
         ref_position = np.array(ref_pose['translation'])
@@ -144,12 +150,17 @@ class Projector:
         # ref_rotation = R.from_quat(ref_quaternion).as_matrix()
         ref_to_world = self.to_matrix4x4(ref_quaternion, ref_position)
         
-        merged_points = []
+        points_in_ref_frame = []
         points_in_world = []
+        semantic = None
         
         for i, points in enumerate(multi_frame_points):
             if len(points) == 0:
                 continue
+
+            if with_semantic:
+                semantic = points[:, 3]
+                points = points[:, :3]
             
             # 获取当前帧的位姿
             current_pose = poses[i]
@@ -159,21 +170,23 @@ class Projector:
             cur_to_world = self.to_matrix4x4(current_quaternion, current_position)
             
             points_homo = self.to_homo_coord(points)
-            transform_matrix = np.linalg.inv(ref_to_world) @ cur_to_world
-            points_transformed = (points_homo @ transform_matrix.T)[:, :3]
-            # 添加到合并点云
-            merged_points.append(points_transformed)
+            # transform_matrix = np.linalg.inv(ref_to_world) @ cur_to_world
+            # points_transformed = (points_homo @ transform_matrix.T)[:, :3]
 
-            p_in_world = (points_homo @ cur_to_world.T)[:, :3]
+            # 拼接语义维度
+            # if with_semantic:
+            #     points_transformed = np.hstack((points_transformed, semantic.reshape(-1, 1)))
+            # points_in_ref_frame.append(points_transformed)
+
+            if with_semantic:
+                p_in_world = (points_homo @ cur_to_world.T)[:, :3]
+                p_in_world = np.hstack((p_in_world, semantic.reshape(-1, 1)))
             points_in_world.append(p_in_world)
 
-        merged_points = np.vstack(merged_points)
+        # points_in_ref_frame = np.vstack(points_in_ref_frame)
+        # points_in_world = np.vstack(points_in_world)
 
-        points_in_world = np.vstack(points_in_world)
-        # np.save(f"points_in_world.npy", points_in_world)
-        # input("press any key to continue...")
-
-        return merged_points
+        return points_in_world
 
 
     def project_points_to_image(self, points_3d):

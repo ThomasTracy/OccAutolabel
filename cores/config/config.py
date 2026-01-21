@@ -63,3 +63,11 @@ class Config:
     def __getitem__(self, key: str) -> Any:
         """支持字典式访问"""
         return self._config[key]
+    
+    def __setitem__(self, key: str, value: Any) -> None:
+        """支持字典式赋值"""
+        self._config[key] = value
+    
+    def __contains__(self, key: str) -> bool:
+        """支持 in 运算符"""
+        return key in self._config

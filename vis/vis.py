@@ -1,6 +1,52 @@
+'''
+单帧可视化 OCC 语义体素可视化
+'''
+
+import cv2
 import numpy as np
 import open3d as o3d
-import cv2
+import math
+import colorsys
+
+def generate_uniform_colors_golden(color_num):
+    """
+    使用黄金角度在RGB立方体中均匀分布颜色
+    """
+    colors = []
+    golden_ratio_conjugate = 0.618033988749895
+    
+    for i in range(color_num):
+        hue = (i * golden_ratio_conjugate) % 1.0
+        rgb = colorsys.hsv_to_rgb(hue, 0.8, 0.95)
+        colors.append(tuple(int(c * 255) for c in rgb))
+    
+    return colors
+
+def generate_uniform_colors_rgb(color_num):
+    """
+    在RGB立方体中生成尽可能均匀分布的颜色
+    """
+    colors = []
+    
+    # 如果颜色数量较少，使用确定性方法
+    if color_num <= 64:
+        # 在RGB空间中找到尽可能均匀的分布
+        side_length = max(2, round(color_num ** (1/3)))
+        points = []
+        
+        for r in np.linspace(0, 1, side_length):
+            for g in np.linspace(0, 1, side_length):
+                for b in np.linspace(0, 1, side_length):
+                    points.append((r, g, b))
+        
+        # 选择前color_num个点
+        selected_points = points[:color_num]
+        colors = [tuple(int(c * 255) for c in rgb) for rgb in selected_points]
+    else:
+        # 对于大量颜色，使用黄金角度方法
+        colors = generate_uniform_colors_golden(color_num)
+    
+    return colors
 
 def create_voxel_bound_lines(voxel_grid):
     voxel_size = voxel_grid.voxel_size
@@ -61,7 +107,8 @@ def visualize_voxels(voxel_data, colors, voxel_size):
         raise ValueError("体素数据格式不正确，应为 [N, 3] 或 [N, 4]")
     
     # 创建点云（体素中心点）
-    points = voxel_coords * voxel_size + voxel_size / 2  # 转换为实际坐标
+    # points = voxel_coords * voxel_size + voxel_size / 2  # 转换为实际坐标
+    points = voxel_coords
     
     # 为每个点分配颜色
     point_colors = np.zeros((len(points), 3))
@@ -70,9 +117,12 @@ def visualize_voxels(voxel_data, colors, voxel_size):
         if label < len(colors):
             # 使用颜色映射，转换为0-1范围
             point_colors[i] = colors[label][:3] / 255.0
+        # Unknown 类别用灰色表示
+        elif label == 100:
+            point_colors[i] = np.array([200, 200, 200]) / 255.0
         else:
-            # 如果标签超出颜色映射范围，使用默认颜色（红色）
-            point_colors[i] = [1.0, 0.0, 0.0]
+            # 如果标签超出颜色映射范围，使用默认颜色（黑色）
+            point_colors[i] = [1.0, 1.0, 1.0]
     
     # 创建Open3D点云对象
     pcd = o3d.geometry.PointCloud()
@@ -87,69 +137,31 @@ def visualize_voxels(voxel_data, colors, voxel_size):
                                      window_name="Voxel Visualization",
                                      width=1200, 
                                      height=800)
-    
-def visualize_pc_on_image(image_data, projected_points):
-    """
-    可视化点云投影结果
-    projected_points: 已经投影到图像上的点
-    """
-    
-    # 将PIL图像转换为OpenCV格式
-    image = np.array(image_data)
-    if len(image.shape) == 3:
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    elif len(image.shape) == 2:
-        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    
-    # 根据深度值归一化颜色
-    depths = None
-    norm_depths = None
-    if projected_points.shape[1] == 3:
-        depths = projected_points[:, 2]
-        norm_depths = (depths - depths.min()) / (depths.max() - depths.min())
-    
-    # 在图像上绘制点
-    for i in range(projected_points.shape[0]):
-        u, v = projected_points[i][:2]
-        u, v = int(u), int(v)
-        
-        # 确保点在图像范围内
-        if 0 <= u < image.shape[1] and 0 <= v < image.shape[0]:
-            # 根据深度值设置颜色（近处为红色，远处为蓝色）
-            if depths is not None:
-                color_value = int(norm_depths[i] * 255)
-                b = color_value
-                g = 0
-                r = 255 - color_value
-            else:
-                b, g, r = 0, 255, 0
-            
-            # 绘制点
-            cv2.circle(image, (u, v), 3, (b, g, r), -1)
-    
-    cv2.imshow('Point Cloud on Image', image)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
 
-def visualize_points(points):
-    colors=None
-    if points.shape[1] == 6:
-        # colors=np.concatenate([points[:, 5:6], points[:, 4:5], points[:, 3:4]], axis=1)
-        colors=points[:, 3:6]
-    point_size=2.0
-    window_name="3D Point Cloud"
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points[:, :3])
+def vis_voxel(voxel_file):
+    colors = np.array(
+        [
+            [21, 174, 103], # 绿色 静态物体
+            [219, 79, 3], # 红色 车辆
+            [250, 190, 0],   # 黄色  人
+            [34, 174, 230], # 蓝色 路
+            [200, 200, 200], # 灰色 空闲
+        ]
+    ).astype(np.uint8)
+    voxel_size = 0.1
+    class_num = 6
+    # colors = generate_uniform_colors_rgb(class_num)
+    colors = np.array(colors).astype(np.uint8)
+    voxel_data = np.load(voxel_file)
+    voxel_data = voxel_data['occ_gt']
+    print("loaded voxel data: ",voxel_data.shape)
+    voxel_data = voxel_data[voxel_data[:,3]!=99]
+    print("valid voxel data: ",voxel_data.shape)
+    visualize_voxels(voxel_data, colors, voxel_size)
 
-    # 如果提供了颜色信息
-    if colors is not None:
-        # 确保颜色值在[0, 1]范围内
-        if np.max(colors) > 1.0:
-            colors = colors / 255.0
-        pcd.colors = o3d.utility.Vector3dVector(colors)
-    else:
-        # 默认设置为灰色
-        pcd.colors = o3d.utility.Vector3dVector(np.full((points.shape[0], 3), [0.5, 0.5, 0.5]))
 
-    # 可视化
-    o3d.visualization.draw_geometries([pcd])
+if __name__ == "__main__":
+    # vis_voxel('/data/Data/OCC_Autolabel/data_clip0/occ_gt/1532402946797517.npz')
+    # vis_voxel('/home/robot/data/nuscenes_mini_clips/clip0000/occ_gt/1532402935697945.npz')
+    vis_voxel('/home/robot/data/clip0/clip0000/occ_gt/1532402941297218.npz')
+    # vis_voxel('/home/robot/data/nuscenes_mini_clips/debug_ray_cast/without_underground.npz')

@@ -1,0 +1,12 @@
+label2label:
+  1: 1
+  2: 2
+  3: 3
+  4: 4
+  5: 5
+  0: 0
+label2name:
+  1: 'vehicle'
+  2: 'people'
+  3: 'road'
+  0: 'static object'
