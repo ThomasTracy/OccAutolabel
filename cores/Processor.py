@@ -7,7 +7,7 @@ from cores.utils.projector import Projector
 
 from cores.category import Category
 
-from tools.crop_partial_points import bin_to_pcd_xyz
+from tools.crop_partial_points import bin_to_pcd
 
 class Processor:
     def __init__(self, config):
@@ -318,18 +318,20 @@ class PostProcessor(Processor):
         """
         使用地面点生成BEV网格,并过滤静态点中的噪声
         
+        逻辑：
+        1. 用ground点在BEV平面生成2D高度图
+        2. 计算static point与该网格ground中最高ground点的相对高度差
+        3. 如果相对高度差小于阈值，认定为噪声删除
+        
         参数:
         points: 输入点云，形状为 (N, 4)，每行包含 [x, y, z, semantic]
-            semantic: 0-地面点,1-静态点
-        grid_size: 网格大小（米）
-        height_threshold: z轴高度阈值,低于此值的静态点将被视为噪声
+            semantic: 0-地面点, 1-静态点
         
         返回:
         filtered_points: 过滤后的点云
-        info_dict: 包含处理信息的字典
         """
         grid_size = self.config['ground_mask_grid_size']
-        height_threshold = self.config['ground_height_threshold']
+        height_threshold = self.config['ground_height_threshold']  # 相对高度阈值
 
         # 分离地面点和静态点
         ground_mask = points[:, 3] == Category.ROAD.value
@@ -337,10 +339,11 @@ class PostProcessor(Processor):
         
         ground_points = points[ground_mask]
         static_points = points[static_mask]
+        other_points = points[~(ground_mask | static_mask)]  # 保留其他类型点
         
         if len(ground_points) == 0:
             print("警告：未找到地面点，跳过噪声过滤")
-            return points, {"status": "no_ground_points"}
+            return points
         
         # 1. 计算BEV平面的边界范围（使用地面点）
         x_min, x_max = ground_points[:, 0].min(), ground_points[:, 0].max()
@@ -349,7 +352,6 @@ class PostProcessor(Processor):
         # 2. 创建网格索引计算函数
         def compute_grid_indices(points_xy, x_min, y_min, grid_size, x_bins, y_bins):
             """向量化计算网格索引"""
-            # 计算网格索引
             x_indices = np.floor((points_xy[:, 0] - x_min) / grid_size).astype(int)
             y_indices = np.floor((points_xy[:, 1] - y_min) / grid_size).astype(int)
             
@@ -364,62 +366,63 @@ class PostProcessor(Processor):
         x_bins = int(np.ceil((x_max - x_min + eps) / grid_size))
         y_bins = int(np.ceil((y_max - y_min + eps) / grid_size))
         
-        # 4. 生成地面点网格mask（向量化）
-        # 计算地面点网格索引
+        # 4. 生成地面高度图（关键改进：保存每个网格的ground最高点高度）
         ground_x_idx, ground_y_idx = compute_grid_indices(
             ground_points[:, :2], x_min, y_min, grid_size, x_bins, y_bins
         )
         
-        # 使用稀疏矩阵技巧快速创建地面点mask
-        # 方法1: 使用np.unique和布尔数组（最快）
-        # 创建一个线性索引：将2D网格展平为1D
-        ground_linear_idx = ground_x_idx * y_bins + ground_y_idx
+        # 使用字典记录每个网格的ground点最高高度
+        from collections import defaultdict
+        grid_z_max = defaultdict(lambda: -np.inf)
         
-        # 使用np.unique获取所有有地面点的网格索引
-        unique_ground_idx = np.unique(ground_linear_idx)
+        for i in range(len(ground_points)):
+            grid_key = (ground_x_idx[i], ground_y_idx[i])
+            grid_z_max[grid_key] = max(grid_z_max[grid_key], ground_points[i, 2])
         
-        # 创建一个布尔数组表示哪些网格有地面点
-        ground_grid_mask_flat = np.zeros(x_bins * y_bins, dtype=bool)
-        ground_grid_mask_flat[unique_ground_idx] = True
+        # 创建ground高度图（使用最高点高度）
+        ground_height_grid = np.full((x_bins, y_bins), np.nan, dtype=np.float32)
+        for (gx, gy), z_max in grid_z_max.items():
+            ground_height_grid[gx, gy] = z_max
         
-        # 将展平的mask恢复为2D
-        ground_grid_mask = ground_grid_mask_flat.reshape(x_bins, y_bins)
-        
-        # 5. 过滤静态点（完全向量化）
+        # 5. 过滤静态点（使用相对高度）
         if len(static_points) > 0:
             # 计算静态点的网格索引
             static_x_idx, static_y_idx = compute_grid_indices(
                 static_points[:, :2], x_min, y_min, grid_size, x_bins, y_bins
             )
             
-            # 使用向量化操作检查条件
-            # 条件1: 静态点所在网格是否有地面点
-            ground_present_mask = ground_grid_mask[static_x_idx, static_y_idx]
+            # 获取每个静态点所在网格的ground高度
+            ground_heights_at_static = ground_height_grid[static_x_idx, static_y_idx]
             
-            # 条件2: 静态点的z高度小于阈值
-            height_mask = static_points[:, 2] < height_threshold
+            # 条件1: 该网格有ground点（ground_height不是nan）
+            has_ground_mask = ~np.isnan(ground_heights_at_static)
             
-            # 两个条件都满足的点是噪声
-            noise_mask = ground_present_mask & height_mask
+            # 条件2: 计算相对高度差（static_z - ground_z）
+            relative_height = static_points[:, 2] - ground_heights_at_static
+            
+            # 条件3: 相对高度差小于阈值（太靠近ground，认为是噪声）
+            too_close_mask = relative_height < height_threshold
+            
+            # 同时满足：有ground且太接近 → 噪声
+            noise_mask = has_ground_mask & too_close_mask
             
             # 保留不是噪声的静态点
             keep_static_mask = ~noise_mask
             filtered_static_points = static_points[keep_static_mask]
             
-            removed_static_count = np.sum(noise_mask)
+            # removed_count = np.sum(noise_mask)
+            
+            # 调试信息
+            # if removed_count > 0:
+                # print(f"[Ground去噪] 移除 {removed_count}/{len(static_points)} 个静态噪声点")
         else:
             filtered_static_points = static_points
-            removed_static_count = 0
         
         # 6. 合并所有点
-        filtered_points = np.concatenate([ground_points, filtered_static_points], axis=0)
-
-        # 使用预分配数组的方式更高效
-        # total_points = len(ground_points) + len(filtered_static_points)
-        # filtered_points = np.empty((total_points, 4), dtype=points.dtype)
-        
-        # filtered_points[:len(ground_points)] = ground_points
-        # filtered_points[len(ground_points):] = filtered_static_points
+        if len(other_points) > 0:
+            filtered_points = np.concatenate([ground_points, filtered_static_points, other_points], axis=0)
+        else:
+            filtered_points = np.concatenate([ground_points, filtered_static_points], axis=0)
         
         return filtered_points
 
@@ -821,7 +824,8 @@ class PostProcessor(Processor):
         dynamic_points_list, static_points_list = self.split_dynamic_objects(non_ground_points_list)
 
         static_points = np.vstack(static_points_list)
-        # ----------------------------------- 通过聚类算法去噪 -----------------------------------
+
+        # 聚类去噪移到了post_process_on_ego中
         # filtered_static_points = self.voxel_clustering_denoise(static_points)
         filtered_static_points = static_points
 

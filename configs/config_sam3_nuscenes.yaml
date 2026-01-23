@@ -27,10 +27,10 @@ dynamic_denoise_ground_z_thresh: 0.4
 
 'downsample': False
 'voxel_size': 0.1
-'rough_voxel_size': 1  # 粗分辨率，用于去噪及聚类动态物体
+'rough_voxel_size': 0.5  # 粗分辨率，用于去噪及聚类动态物体
 
 'ground_mask_grid_size': 0.2  # 用来过滤噪点的BEV栅格大小
-'ground_height_threshold': 0.2  # 地面噪声点的高度阈值
+'ground_height_threshold': 0.05  # 地面噪声点的高度阈值
 'std_multiplier': 3  # 过滤高于地面点很多的点的标准差乘数
 
 # 'voxel_range':  [-50, -50, -1, 50, 50, 2] # [-8, -8, -1, 8, 8, 2]

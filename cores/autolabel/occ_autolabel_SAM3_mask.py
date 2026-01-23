@@ -237,8 +237,6 @@ end_header
                 mask_label = mask[y, x]
                 
                 # 映射到学习标签
-                # if mask_label in self.label_mapping['label2label']:
-                #     semantics[i] = self.label_mapping['label2label'][mask_label]
                 semantics[i] = mask_label
         
         return semantics
@@ -446,7 +444,6 @@ end_header
             # -------------------------------------- 对ego下的多帧点云进行后处理 --------------------------------------
             static_semantic_points_full = self.post_processor.points_in_range(static_semantic_points_full)
 
-            # static_semantic_points_full = self.post_processor.post_process_on_ego(static_semantic_points_full)
             static_semantic_points_full = self.post_processor.post_process_on_ego(static_semantic_points_full)
 
             # -------------------------------------- 加入动态点云 --------------------------------------
