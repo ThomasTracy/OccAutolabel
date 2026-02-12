@@ -117,21 +117,21 @@ def bin_to_pcd(bin_file_path, pcd_file_path, dimension=4):
 
 if __name__ == "__main__":
     # 方法1: 单个文件转换
-    bin_path = "/home/robot/data/tracking_debug/clip0000/lidar"
-    pcd_path = "/home/robot/data/tracking_debug/clip0000/lidar_pcd"
+    # bin_path = "/home/robot/data/tracking_debug/clip0000/lidar"
+    # pcd_path = "/home/robot/data/tracking_debug/clip0000/lidar_pcd"
 
-    lidar_files = os.listdir(bin_path)
-    timestamps = [f.split('.')[0] for f in lidar_files if f.endswith('.bin')]
-    timestamps.sort(key=lambda x: float(x))
+    # lidar_files = os.listdir(bin_path)
+    # timestamps = [f.split('.')[0] for f in lidar_files if f.endswith('.bin')]
+    # timestamps.sort(key=lambda x: float(x))
 
-    for ts in timestamps:
-        input_path = os.path.join(bin_path, ts+".bin")
-        output_path = os.path.join(pcd_path, ts+".pcd")
-        bin_to_pcd(input_path, output_path, dimension=4)
+    # for ts in timestamps:
+    #     input_path = os.path.join(bin_path, ts+".bin")
+    #     output_path = os.path.join(pcd_path, ts+".pcd")
+    #     bin_to_pcd(input_path, output_path, dimension=4)
 
-    # bin_path = "/home/robot/data/debug/clip0000/lidar/1532402927647951.bin"
-    # pcd_path = "/home/robot/data/debug/clip0000/lidar/1532402927647951.pcd"
+    bin_path = "/home/robot/data/Autolabel/map_converted/test0/lidar/1761730190050189000.bin"
+    pcd_path = "/home/robot/data/Autolabel/map_converted/test0/1761730190050189000.pcd"
 
-    # bin_to_pcd(bin_path, pcd_path, dimension=4)
+    bin_to_pcd(bin_path, pcd_path, dimension=4)
     # bin_to_pcd_xyz(bin_path, pcd_path, dimension=3)
     

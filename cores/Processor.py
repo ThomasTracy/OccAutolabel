@@ -824,28 +824,535 @@ class PostProcessor(Processor):
         dynamic_points_list, static_points_list = self.split_dynamic_objects(non_ground_points_list)
 
         static_points = np.vstack(static_points_list)
+        ground_points = np.vstack(ground_points_list)        
 
         # 聚类去噪移到了post_process_on_ego中
         # filtered_static_points = self.voxel_clustering_denoise(static_points)
         filtered_static_points = static_points
 
         # ----------------------------------- 合并地面点和静态物体点 -----------------------------------
-        ground_points = np.vstack(ground_points_list)
-
         non_dynamic_points = np.vstack([filtered_static_points, ground_points])
 
         return non_dynamic_points
     
+
+    def refine_ground_by_plane_fitting(self, points):
+        """
+        使用RANSAC平面拟合对ground和static点进行重新分类（优化版）
+        
+        参数:
+            points: np.array (N, 4), 点云数据 [x, y, z, semantic]
+            
+        返回:
+            refined_ground: np.array, 重新分类后的地面点
+            refined_static: np.array, 重新分类后的静态点
+        """
+        # messi 动态点和静态点地面去噪
+        non_ground_points = points[points[:, 3] != Category.ROAD.value]
+        ground_points = points[points[:, 3] == Category.ROAD.value]
+        
+        if len(ground_points) == 0:
+            print("警告：地面点为空，跳过平面拟合")
+            return points
+        
+        if len(non_ground_points) == 0:
+            print("警告：静态点为空，跳过重分类")
+            return points
+        
+        # 获取配置参数
+        height_threshold = self.config['ground_plane_height_threshold']
+        
+        # 🚀 优化1: 降采样ground点以加速RANSAC
+        ground_xyz = ground_points[:, :3]
+        n_points = len(ground_xyz)
+        
+        # 如果点数过多，随机采样以加速
+        max_sample_points = 10000  # 最多使用10000个点进行拟合
+        if n_points > max_sample_points:
+            sample_indices = np.random.choice(n_points, max_sample_points, replace=False)
+            ground_xyz_sampled = ground_xyz[sample_indices]
+            # print(f"降采样：{n_points} -> {max_sample_points} 个ground点用于RANSAC")
+        else:
+            ground_xyz_sampled = ground_xyz
+        
+        # RANSAC 平面拟合参数
+        max_iterations = 200  # 🚀 优化2: 降低迭代次数（原1000->200）
+        sample_size = 3
+        distance_threshold = height_threshold
+        min_inliers_ratio = 0.3
+        
+        # -------------------- RANSAC 平面拟合 --------------------
+        best_plane = None
+        best_inliers_count = 0
+        n_sampled = len(ground_xyz_sampled)
+        
+        if n_sampled < sample_size:
+            print(f"警告：地面点数量({n_sampled})不足，无法拟合平面")
+            return points
+        
+        # 🚀 优化3: 预分配数组避免重复创建
+        for iteration in range(max_iterations):
+            # 1. 随机选择3个点
+            sample_indices = np.random.choice(n_sampled, sample_size, replace=False)
+            p1, p2, p3 = ground_xyz_sampled[sample_indices]
+            
+            # 2. 计算法向量
+            v1 = p2 - p1
+            v2 = p3 - p1
+            normal = np.cross(v1, v2)
+            
+            # 检查退化
+            normal_length = np.linalg.norm(normal)
+            if normal_length < 1e-6:
+                continue
+            
+            normal = normal / normal_length
+            d = -np.dot(normal, p1)
+            
+            # 3. 向量化计算距离
+            distances = np.abs(np.dot(ground_xyz_sampled, normal) + d)
+            
+            # 4. 统计内点
+            inliers_count = np.sum(distances < distance_threshold)
+            
+            # 5. 更新最佳模型
+            if inliers_count > best_inliers_count:
+                best_inliers_count = inliers_count
+                best_plane = (normal.copy(), d)  # 注意复制
+        
+        # 检查是否找到有效平面
+        if best_plane is None or best_inliers_count < n_sampled * min_inliers_ratio:
+            print(f"警告：RANSAC未找到有效地面平面（内点数: {best_inliers_count}/{n_sampled}）")
+            return points
+        
+        normal, d = best_plane
+        
+        # 🚀 优化4: 移除SVD优化步骤（主要性能瓶颈）
+        # 直接使用RANSAC得到的平面，精度已足够
+        # SVD对大规模点云性能影响极大，可以跳过
+        
+        # print(f"✅ 平面拟合成功：法向量={normal}, d={d:.3f}, 内点数={best_inliers_count}/{n_sampled}")
+        
+        # -------------------- 重新分类 static 点 --------------------
+        if len(non_ground_points) > 0:
+            non_ground_xyz = non_ground_points[:, :3]
+            
+            # 向量化计算距离
+            abs_distances = np.abs(np.dot(non_ground_xyz, normal) + d)
+            
+            # 创建掩码
+            to_ground_mask = abs_distances < height_threshold
+            
+            # 🚀 优化5: 直接修改semantic值，避免数组复制
+            # 创建结果数组副本
+            result_points = points.copy()
+            
+            # 找到static点在原始数组中的位置
+            static_mask = result_points[:, 3] != Category.ROAD.value
+            static_indices = np.where(static_mask)[0]
+            
+            # 将需要重分类的点的semantic改为ground
+            reclassified_indices = static_indices[to_ground_mask]
+            result_points[reclassified_indices, 3] = Category.ROAD.value
+            
+            reclassified_count = len(reclassified_indices)
+            # print(f"✅ 重新分类：{reclassified_count}/{len(static_points)} 个static点归为ground")
+            
+            return result_points
+        else:
+            return points
+
+
+    def filter_dynamic_objects(self, points):
+        """
+        通过体素化和聚类算法，滤除动态物体点
+        
+        参数:
+            points: np.array (N, 4), 不含地面点的点云 [x, y, z, semantic]
+                    只包含静态物体(Category.STATIC_OBJECT)和动态物体(Category.VEHICLE, Category.PEOPLE)
+        
+        返回:
+            filtered_points: np.array (M, 4), 更新后的带有语义的点云
+        """
+        
+        if len(points) == 0:
+            return points
+        
+        # 配置参数
+        voxel_size = self.config['dynamic_filter_voxel_size']
+        dynamic_ratio_threshold = self.config['dynamic_ratio_threshold']
+        min_points_per_voxel = self.config['valid_voxel_point_threshold_dynamic_filter']
+        
+        # 动态物体的语义标签
+        dynamic_labels = [Category.VEHICLE.value, Category.PEOPLE.value]
+        
+        # 1. 体素化
+        xyz = points[:, :3]
+        semantic = points[:, 3].astype(np.int32)
+        
+        voxel_coords = np.floor(xyz / voxel_size).astype(np.int32)
+        
+        # 构建体素字典：voxel_coord -> {'points_indices': [], 'semantics': [], 'visited': False, 'is_valid': False}
+        voxel_dict = {}
+        
+        for i, voxel_coord in enumerate(voxel_coords):
+            voxel_key = tuple(voxel_coord)
+            
+            if voxel_key not in voxel_dict:
+                voxel_dict[voxel_key] = {
+                    'points_indices': [],
+                    'semantics': [],
+                    'visited': False,
+                    'is_valid': False,
+                    'coord': voxel_coord
+                }
+            
+            voxel_dict[voxel_key]['points_indices'].append(i)
+            voxel_dict[voxel_key]['semantics'].append(semantic[i])
+        
+        # 1.5 标记有效体素（点数足够），并收集无效体素中的所有点
+        invalid_voxel_points = []
+        
+        for voxel_key, voxel_data in voxel_dict.items():
+            if len(voxel_data['points_indices']) >= min_points_per_voxel:
+                voxel_data['is_valid'] = True
+            else:
+                # 无效体素：将其中所有点标记删除（不管是动态还是静态）
+                point_indices = voxel_data['points_indices']
+                invalid_voxel_points.extend(point_indices)
+        
+        # 2. 26邻域区域增长聚类（只对有效体素进行聚类）
+        def get_26_neighbors(voxel_coord):
+            """获取26邻域的体素坐标"""
+            neighbors = []
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    for dz in [-1, 0, 1]:
+                        if dx == 0 and dy == 0 and dz == 0:
+                            continue
+                        neighbor_coord = voxel_coord + np.array([dx, dy, dz])
+                        neighbors.append(tuple(neighbor_coord))
+            return neighbors
+        
+        clusters = []  # 存储聚类结果，每个聚类是体素key的列表
+        
+        # 遍历所有有效且未访问的体素进行区域增长
+        for voxel_key, voxel_data in voxel_dict.items():
+            if voxel_data['visited'] or not voxel_data['is_valid']:
+                continue
+            
+            # 开始新的聚类
+            cluster = []
+            queue = deque([voxel_key])
+            voxel_data['visited'] = True
+            
+            while queue:
+                current_key = queue.popleft()
+                cluster.append(current_key)
+                
+                current_data = voxel_dict[current_key]
+                
+                # 获取26邻域
+                neighbors = get_26_neighbors(current_data['coord'])
+                
+                # 检查每个邻域体素
+                for neighbor_key in neighbors:
+                    if neighbor_key in voxel_dict:
+                        neighbor_data = voxel_dict[neighbor_key]
+                        
+                        # 只有有效体素才能加入聚类
+                        if not neighbor_data['visited'] and neighbor_data['is_valid']:
+                            neighbor_data['visited'] = True
+                            queue.append(neighbor_key)
+            
+            if cluster:
+                clusters.append(cluster)
+        
+        # # ==================== 可视化聚类结果 ====================
+        # print(f"聚类完成：共 {len(clusters)} 个聚类")
+        
+        # # 为每个聚类分配不同的颜色ID（用于可视化）
+        # vis_points = []
+        # for cluster_idx, cluster in enumerate(clusters):
+        #     cluster_color = (cluster_idx % 20) + 1  # 使用1-20循环标记不同聚类
+            
+        #     for voxel_key in cluster:
+        #         point_indices = voxel_dict[voxel_key]['points_indices']
+        #         for idx in point_indices:
+        #             x, y, z = points[idx, :3]
+        #             vis_points.append([x, y, z, cluster_color])
+        
+        # if len(vis_points) > 0:
+        #     vis_points_array = np.array(vis_points)
+        #     vis_save_path = "/home/robot/data/Autolabel/ZG_AUTOLABEL/clusters_visualization.pcd"
+        #     bin_to_pcd(vis_points_array, vis_save_path)
+        #     print(f"✅ 聚类可视化保存至: {vis_save_path}")
+        #     print(f"   - 总聚类数: {len(clusters)}")
+        #     print(f"   - 总点数: {len(vis_points_array)}")
+        # # =========================================================
+        
+        # 3. 统计每个聚类中动态物体体素的比例
+        result_points = points.copy()
+        
+        # 获取最小有效体素数量阈值
+        min_valid_voxel_count = self.config['valid_dynamic_voxel_size']
+        
+        # 记录需要删除的点的索引
+        points_to_remove = []
+        
+        for cluster in clusters:
+            total_voxel_count = len(cluster)
+            
+            # 3.1 如果聚类中的体素数量小于阈值，标记该聚类中的所有点为待删除
+            if total_voxel_count < min_valid_voxel_count:
+                for voxel_key in cluster:
+                    point_indices = voxel_dict[voxel_key]['points_indices']
+                    points_to_remove.extend(point_indices)
+                continue  # 跳过后续处理
+            
+            # 3.2 统计该聚类中的动态物体体素数量和动态物体类别分布
+            dynamic_voxel_count = 0
+            
+            # 统计聚类中各类动态物体的点数
+            vehicle_count = 0
+            people_count = 0
+            
+            for voxel_key in cluster:
+                voxel_semantics = voxel_dict[voxel_key]['semantics']
+                
+                # 统计该体素中各类动态物体的点数
+                for sem in voxel_semantics:
+                    if sem == Category.VEHICLE.value:
+                        vehicle_count += 1
+                    elif sem == Category.PEOPLE.value:
+                        people_count += 1
+                
+                # 如果该体素中有任何动态物体点，认为是动态体素
+                if any(sem in dynamic_labels for sem in voxel_semantics):
+                    dynamic_voxel_count += 1
+            
+            # 4. 如果动态物体体素比例 > 阈值，将整个聚类标记为动态物体
+            dynamic_ratio = dynamic_voxel_count / total_voxel_count if total_voxel_count > 0 else 0
+            
+            if dynamic_ratio > dynamic_ratio_threshold:
+                # 确定使用哪个动态物体类别（点数多的）
+                if vehicle_count > people_count:
+                    target_semantic = Category.VEHICLE.value
+                elif people_count > vehicle_count:
+                    target_semantic = Category.PEOPLE.value
+                else:
+                    # 如果相等，默认使用vehicle
+                    target_semantic = Category.VEHICLE.value
+                
+                # 将该聚类中所有静态点标记为目标动态物体类别
+                for voxel_key in cluster:
+                    point_indices = voxel_dict[voxel_key]['points_indices']
+                    for idx in point_indices:
+                        # if result_points[idx, 3] == Category.STATIC_OBJECT.value:
+                        result_points[idx, 3] = target_semantic
+        
+        # 5. 删除无效聚类中的所有点和无效体素中的所有点
+        points_to_remove.extend(invalid_voxel_points)
+        
+        if points_to_remove:
+            # 创建掩码标记要保留的点
+            keep_mask = np.ones(len(result_points), dtype=bool)
+            keep_mask[points_to_remove] = False
+            result_points = result_points[keep_mask]
+        
+        return result_points
+
+
+    def filter_dynamic_objects_people_prior(self, points):
+        """
+        通过体素化和聚类算法，滤除动态物体点（基于存在性的语义赋值）
+        
+        参数:
+            points: np.array (N, 4), 不含地面点的点云 [x, y, z, semantic]
+                    只包含静态物体(Category.STATIC_OBJECT)和动态物体(Category.VEHICLE, Category.PEOPLE)
+        
+        返回:
+            filtered_points: np.array (M, 4), 更新后的带有语义的点云
+            
+        语义赋值逻辑:
+            - 如果聚类中存在任意行人语义体素，则整个聚类赋值为行人
+            - 否则整个聚类赋值为汽车
+        """
+        
+        if len(points) == 0:
+            return points
+        
+        # 配置参数
+        voxel_size = self.config['dynamic_filter_voxel_size']
+        min_points_per_voxel = self.config['valid_voxel_point_threshold_dynamic_filter']
+        
+        # 动态物体的语义标签
+        dynamic_labels = [Category.VEHICLE.value, Category.PEOPLE.value]
+        
+        # 1. 体素化
+        xyz = points[:, :3]
+        semantic = points[:, 3].astype(np.int32)
+        
+        voxel_coords = np.floor(xyz / voxel_size).astype(np.int32)
+        
+        # 构建体素字典：voxel_coord -> {'points_indices': [], 'semantics': [], 'visited': False, 'is_valid': False}
+        voxel_dict = {}
+        
+        for i, voxel_coord in enumerate(voxel_coords):
+            voxel_key = tuple(voxel_coord)
+            
+            if voxel_key not in voxel_dict:
+                voxel_dict[voxel_key] = {
+                    'points_indices': [],
+                    'semantics': [],
+                    'visited': False,
+                    'is_valid': False,
+                    'coord': voxel_coord
+                }
+            
+            voxel_dict[voxel_key]['points_indices'].append(i)
+            voxel_dict[voxel_key]['semantics'].append(semantic[i])
+        
+        # 1.5 标记有效体素（点数足够）
+        for voxel_key, voxel_data in voxel_dict.items():
+            if len(voxel_data['points_indices']) >= min_points_per_voxel:
+                voxel_data['is_valid'] = True
+        
+        # 2. 26邻域区域增长聚类（只对有效体素进行聚类）
+        def get_26_neighbors(voxel_coord):
+            """获取26邻域的体素坐标"""
+            neighbors = []
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    for dz in [-1, 0, 1]:
+                        if dx == 0 and dy == 0 and dz == 0:
+                            continue
+                        neighbor_coord = voxel_coord + np.array([dx, dy, dz])
+                        neighbors.append(tuple(neighbor_coord))
+            return neighbors
+        
+        clusters = []  # 存储聚类结果，每个聚类是体素key的列表
+        
+        # 遍历所有有效且未访问的体素进行区域增长
+        for voxel_key, voxel_data in voxel_dict.items():
+            if voxel_data['visited'] or not voxel_data['is_valid']:
+                continue
+            
+            # 开始新的聚类
+            cluster = []
+            queue = deque([voxel_key])
+            voxel_data['visited'] = True
+            
+            while queue:
+                current_key = queue.popleft()
+                cluster.append(current_key)
+                
+                current_data = voxel_dict[current_key]
+                
+                # 获取26邻域
+                neighbors = get_26_neighbors(current_data['coord'])
+                
+                # 检查每个邻域体素
+                for neighbor_key in neighbors:
+                    if neighbor_key in voxel_dict:
+                        neighbor_data = voxel_dict[neighbor_key]
+                        
+                        # 只有有效体素才能加入聚类
+                        if not neighbor_data['visited'] and neighbor_data['is_valid']:
+                            neighbor_data['visited'] = True
+                            queue.append(neighbor_key)
+            
+            if cluster:
+                clusters.append(cluster)
+
+        # # ==================== 可视化聚类结果 ====================
+        # print(f"聚类完成：共 {len(clusters)} 个聚类")
+        
+        # # 为每个聚类分配不同的颜色ID（用于可视化）
+        # vis_points = []
+        # for cluster_idx, cluster in enumerate(clusters):
+        #     cluster_color = (cluster_idx % 20) + 1  # 使用1-20循环标记不同聚类
+            
+        #     for voxel_key in cluster:
+        #         point_indices = voxel_dict[voxel_key]['points_indices']
+        #         for idx in point_indices:
+        #             x, y, z = points[idx, :3]
+        #             vis_points.append([x, y, z, cluster_color])
+        
+        # if len(vis_points) > 0:
+        #     vis_points_array = np.array(vis_points)
+        #     vis_save_path = "/home/robot/data/Autolabel/AUTOLABEL_yuanqv_0208/debug/clip0004/clusters_visualization.pcd"
+        #     bin_to_pcd(vis_points_array, vis_save_path)
+        #     print(f"✅ 聚类可视化保存至: {vis_save_path}")
+        #     print(f"   - 总聚类数: {len(clusters)}")
+        #     print(f"   - 总点数: {len(vis_points_array)}")
+        # # =========================================================
+        # input("----------------------")
+        
+        # 3. 基于存在性判断聚类的语义类别
+        result_points = points.copy()
+        
+        for cluster in clusters:
+            # 检查聚类中是否存在行人体素
+            has_people = False
+            has_dynamic = False
+            
+            for voxel_key in cluster:
+                voxel_semantics = voxel_dict[voxel_key]['semantics']
+                
+                # 检查该体素中是否有行人点
+                if Category.PEOPLE.value in voxel_semantics:
+                    has_people = True
+                    has_dynamic = True
+                    break  # 一旦发现行人，就可以确定整个聚类的语义
+                
+                # 检查是否有任何动态物体点
+                if any(sem in dynamic_labels for sem in voxel_semantics):
+                    has_dynamic = True
+            
+            # 4. 根据存在性判断结果，赋值语义
+            if has_dynamic:
+                # 如果存在行人体素，整个聚类赋值为行人；否则赋值为汽车
+                if has_people:
+                    target_semantic = Category.PEOPLE.value
+                else:
+                    target_semantic = Category.VEHICLE.value
+                
+                # 将该聚类中所有静态点标记为目标动态物体类别
+                for voxel_key in cluster:
+                    point_indices = voxel_dict[voxel_key]['points_indices']
+                    for idx in point_indices:
+                        # if result_points[idx, 3] == Category.STATIC_OBJECT.value:
+                        result_points[idx, 3] = target_semantic
+        
+        return result_points
+
+
 
     def post_process_on_ego(self, points):
         '''
         对转换到ego坐标系下后并且crop后的多帧点云进行后处理
         
         '''
+        # ----------------------------------- 拟合地面平面，后通过高度差阈值将static点重定义为地面点 -----------------------------------
+        points = self.refine_ground_by_plane_fitting(points)
+
         # ----------------------------------- 通过地面mask 对地面点中的静态点进行去噪 -----------------------------------
         groud_denoised_points = self.bev_mask_ground_denoise(points)
 
-        static_points = groud_denoised_points[groud_denoised_points[:, 3] == Category.STATIC_OBJECT.value]
+        # ----------------------------------- 动态物体点聚类去除 -----------------------------------
+        non_ground_points = groud_denoised_points[groud_denoised_points[:, 3] != Category.ROAD.value]
+
+        # messi
+        # static_and_dynamic_points = self.filter_dynamic_objects(non_ground_points)
+        static_and_dynamic_points = self.filter_dynamic_objects(non_ground_points)
+        # save_path = "/home/robot/data/Autolabel/AUTOLABEL_yuanqv_0208/debug/clip0004/dynamic_static.pcd"
+        # bin_to_pcd(static_and_dynamic_points, save_path)
+        # input("~~~~~~~~~~~~~~~~~")
+
+        dynamic_points = static_and_dynamic_points[static_and_dynamic_points[:, 3] == Category.VEHICLE.value]
+
+        static_points = static_and_dynamic_points[static_and_dynamic_points[:, 3] == Category.STATIC_OBJECT.value]
         ground_points = groud_denoised_points[groud_denoised_points[:, 3] == Category.ROAD.value]
         # ----------------------------------- 通过对静态点进行聚类算法去噪 -----------------------------------
         denoised_static = self.voxel_clustering_denoise(static_points)
@@ -856,5 +1363,7 @@ class PostProcessor(Processor):
         full_static_points = np.vstack([denoised_ground, denoised_static])
 
         final_points = full_static_points
+
+        # final_points = np.vstack([denoised_ground,denoised_static,dynamic_points])
 
         return final_points

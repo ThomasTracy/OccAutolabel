@@ -168,9 +168,15 @@ def visualize_voxels(voxel_data: np.ndarray,
     print(f"[Timer] 总耗时: {time.time() - start_time:.3f}s")
     print(f"[Info] 输入数据点数: {len(voxel_coords)}, 实际体素数: {len(actual_voxel_centers)}")
     
+    # 创建坐标轴（原点位置，大小可调整）
+    coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+        size=1.0,  # 坐标轴长度，可根据需要调整
+        origin=[0, 0, 0]  # 坐标轴原点位置
+    )
+    
     # 可视化
     o3d.visualization.draw_geometries(
-        [voxel_grid, bounding_lines], 
+        [voxel_grid, bounding_lines, coordinate_frame], 
         window_name=window_name,
         width=window_size[0], 
         height=window_size[1]
@@ -243,7 +249,7 @@ if __name__ == "__main__":
 
 
 # 基本使用
-# python vis/vis.py --voxel_file path/to/data.npz
+# python vis/vis.py --voxel_file /home/robot/data/Autolabel/AUTOLABEL_0205/debug/clip0006/occ_gt/1770287865099972338.npz
 
 # 自定义参数
 # python vis/vis.py --voxel_file data.npz --voxel_size 0.2 --filter_label 99

@@ -5,6 +5,7 @@ import cv2
 import yaml
 import numpy as np
 from typing import List, Dict, Tuple
+from tqdm import tqdm
 
 import matplotlib.pyplot as plt
 
@@ -23,7 +24,7 @@ COLOR_MAP = {
     5: [0, 0, 255]
 }
 
-def visualize_2d_points_mask(image, points2d, mask, alpha=0.5, point_color='red', point_size=5):
+def visualize_2d_points_mask(image, points2d, mask, alpha=0.5, point_color='red', point_size=2):
     """
     可视化图像、2D点和mask
     
@@ -144,7 +145,18 @@ class OCCAutolabelwithMask(OCCAutolabelBase):
 
         self.camera_path = os.path.join(root, 'camera')
 
-        self.calibrations = self.load_json_data(os.path.join(root, 'calibration', 'calibration.json'))
+        self.camera_timestamps = self.get_camera_timestamps()
+
+        # 读取标定文件：支持新的单独yaml格式
+        calibration_dir = os.path.join(root, 'calibration')
+        calibration_json = os.path.join(calibration_dir, 'calibration.json')
+        
+        if os.path.exists(calibration_json):
+            # 旧格式：所有标定信息在一个json文件中
+            self.calibrations = self.load_json_data(calibration_json)
+        else:
+            # 新格式：每个传感器单独的yaml文件
+            self.calibrations = self._load_calibrations_from_yaml(calibration_dir)
 
         self.poses = self.load_json_data(os.path.join(root, 'pose', 'pose.json'))
         
@@ -154,6 +166,143 @@ class OCCAutolabelwithMask(OCCAutolabelBase):
             with open(self.config['label_map'], 'r') as f:
                 self.label_mapping = yaml.safe_load(f)
 
+    
+    def get_camera_timestamps(self):
+        cam_names = os.listdir(self.camera_path)
+        camera_timestamps = {}
+        for cam_name in cam_names:
+            cam_path = os.path.join(self.camera_path, cam_name)
+            cam_timestamps = self.get_all_timestamps(cam_path)
+            camera_timestamps[cam_name] = cam_timestamps
+        return camera_timestamps
+    
+    def _load_calibrations_from_yaml(self, calibration_dir):
+        """
+        从lidar.yaml加载所有传感器标定信息
+        
+        Args:
+            calibration_dir: 标定文件目录
+        
+        Returns:
+            dict: 标定信息字典
+        """
+        calibrations = {}
+        
+        # 相机名称映射 (camera_front -> CAM_FRONT)
+        camera_name_mapping = {
+            'camera_front': 'CAM_FRONT',
+            'camera_left': 'CAM_LEFT',
+            'camera_right': 'CAM_RIGHT',
+            'camera_back': 'CAM_BACK'
+        }
+        
+        # 相机到lidar变换的映射
+        camera_to_lidar_mapping = {
+            'CAM_FRONT': 'camera_front_to_lidar_front',
+            'CAM_LEFT': 'camera_left_to_lidar_front',
+            'CAM_RIGHT': 'camera_right_to_lidar_front',
+            'CAM_BACK': 'camera_back_to_lidar_front'
+        }
+        
+        # 读取lidar.yaml
+        lidar_yaml = os.path.join(calibration_dir, 'lidar.yaml')
+        if not os.path.exists(lidar_yaml):
+            raise FileNotFoundError(f"lidar.yaml不存在: {lidar_yaml}")
+        
+        # 读取YAML文件
+        with open(lidar_yaml, 'r') as f:
+            lidar_data = yaml.safe_load(f)
+        
+        # 获取内参和外参
+        intrinsics = lidar_data.get('intrinsics', {})
+        extrinsics = lidar_data.get('extrinsic_transforms', {})
+        
+        # 读取各个相机的标定信息
+        for camera_key, cam_name in camera_name_mapping.items():
+            camera_intrinsic = intrinsics.get(camera_key, {})
+            
+            if camera_intrinsic:
+                # 读取K和D
+                camera_matrix = np.array(camera_intrinsic['K'])
+                distortion_coeffs = np.array(camera_intrinsic['D']).flatten()
+                
+                # 获取相机到lidar的变换
+                camera_to_lidar_key = camera_to_lidar_mapping.get(cam_name, f"{camera_key}_to_lidar_front")
+                camera_to_lidar = np.array(extrinsics.get(camera_to_lidar_key, np.eye(4)))
+                
+                # 存储标定信息
+                calibrations[cam_name] = {
+                    'camera_intrinsic': camera_matrix.tolist(),
+                    'distortion_coeffs': distortion_coeffs.tolist(),
+                    'camera_to_lidar': camera_to_lidar.tolist()
+                }
+        
+        # 读取lidar变换链：lidar_front -> imu_front -> base
+        lidar_front_to_imu_front = np.array(extrinsics.get('lidar_front_to_imu_front', np.eye(4)))
+        imu_front_to_base = np.array(extrinsics.get('imu_front_to_base', np.eye(4)))
+        lidar_to_ego_matrix = imu_front_to_base @ lidar_front_to_imu_front
+        
+        calibrations['lidar'] = {
+            'lidar_to_ego': lidar_to_ego_matrix.tolist()
+        }
+        
+        return calibrations
+    
+    def get_calibration(self, sensor_name):
+        """
+        获取传感器标定信息
+        
+        Args:
+            sensor_name: 传感器名称
+        
+        Returns:
+            dict: 标定信息
+        """
+        if 'lidar' in sensor_name.lower():
+            lidar_to_ego = np.array(self.calibrations['lidar']['lidar_to_ego'])
+            return {
+                'lidar2ego_rotation': lidar_to_ego[:3, :3],
+                'lidar2ego_translation': lidar_to_ego[:3, 3],
+                'lidar_to_ego': lidar_to_ego
+            }
+        elif 'cam' in sensor_name.lower():
+            calib = {
+                'camera_intrinsic': np.array(self.calibrations[sensor_name]['camera_intrinsic']),
+                'camera_to_lidar': np.array(self.calibrations[sensor_name]['camera_to_lidar'])
+            }
+            # 如果有畸变系数，也返回
+            if 'distortion_coeffs' in self.calibrations[sensor_name]:
+                calib['distortion_coeffs'] = np.array(self.calibrations[sensor_name]['distortion_coeffs'])
+            return calib
+        else:
+            return {}
+
+    def align_timestamps(self, cam_name, timestamp):
+        """
+        对齐相机时间戳和LiDAR时间戳，找到最接近的时间戳
+        
+        Args:
+            cam_name: 相机名称
+            timestamp: LiDAR时间戳
+        
+        Returns:
+            str: 对齐后的相机时间戳
+        """
+        cam_timestamps = self.camera_timestamps.get(cam_name, [])
+        if not cam_timestamps:
+            return None
+        
+        # 将时间戳转换为整数进行比较
+        target_time = int(timestamp)
+        cam_times_int = [int(ts) for ts in cam_timestamps]
+        
+        # 找到最接近的时间戳
+        closest_time = min(cam_times_int, key=lambda x: abs(x - target_time))
+
+        if abs(closest_time - target_time) > 50000000:  # 超过0.05秒(50ms)则认为没有合适的时间戳
+            return None
+        
+        return str(closest_time)
 
     def save_occupancy_to_ply(self, occupancy_data, ply_path):
         """
@@ -270,34 +419,57 @@ end_header
                 continue
             
             # 加载图像和mask
-            image = self.load_camera_image(timestamp, cam_name)
-            mask = self.load_semantic_mask(self.mask_path, timestamp, cam_name)
+            image_timestamp = self.align_timestamps(cam_name, timestamp)
+            if image_timestamp is None:
+                print(f"Warning: No aligned timestamp found for camera {cam_name} at LiDAR timestamp {timestamp}")
+                continue
+            # print(f"Using aligned timestamp {image_timestamp} for camera {cam_name} at LiDAR timestamp {timestamp}")
+            # input("-----------")
+            image = self.load_camera_image(image_timestamp, cam_name)
+            mask = self.load_semantic_mask(self.mask_path, image_timestamp, cam_name)
             
             cam_calib = self.get_calibration(cam_name)
             camera_matrix = cam_calib.get('camera_intrinsic', None)
             distortion_coeffs = cam_calib.get('distortion_coeffs', None)
-            camera_to_ego_rotation = cam_calib.get('cam2ego_rotation', None)
-            camera_to_ego_translation = cam_calib.get('cam2ego_translation', None)
-
-            # 因为之前在多帧点云拼接时已经做过lidar到ego的转换，所以这里直接设为None
-            lidar_to_ego_rotation = None
-            lidar_to_ego_translation = None
+            camera_to_lidar = cam_calib.get('camera_to_lidar', None)
+            
+            # 将点云从ego坐标系转换到lidar_front坐标系
+            # lidar_points当前是ego坐标系，需要转换到lidar_front坐标系进行投影
+            # 因为projection中的camera_to_lidar是相机到lidar_front的变换
+            lidar_calib = self.get_calibration('lidar')
+            lidar_to_ego = lidar_calib['lidar_to_ego']
+            ego_to_lidar = np.linalg.inv(lidar_to_ego)
+            lidar_points_homo = self.projector.to_homo_coord(lidar_points[:, :3])
+            lidar_points_in_lidar_front = (lidar_points_homo @ ego_to_lidar.T)[:, :3]
 
             # cv2.imread 获取的图片w和h顺序反向
             image_shape = np.zeros(2)
             image_shape[0], image_shape[1] = image.shape[1], image.shape[0]
-            points2d, valid_mask = self.projector.projection(
-                lidar_points,
-                image_shape=image_shape,
-                camera_matrix=camera_matrix,
-                distortion_coeffs=distortion_coeffs,
-                camera_to_ego_rotation=camera_to_ego_rotation,
-                camera_to_ego_translation=camera_to_ego_translation,
-                lidar_to_ego_rotation=lidar_to_ego_rotation,
-                lidar_to_ego_translation=lidar_to_ego_translation
-            )
+            
+            # 检查是否是鱼眼相机
+            is_fisheye = False
+            if distortion_coeffs is not None and len(distortion_coeffs) == 4:
+                is_fisheye = True
+            
+            # 使用新的projection接口
+            if is_fisheye:
+                points2d, valid_mask = self.projector.projection_fisheye(
+                    lidar_points_in_lidar_front,
+                    image_shape=image_shape,
+                    camera_matrix=camera_matrix,
+                    distortion_coeffs=distortion_coeffs,
+                    camera_to_lidar=camera_to_lidar
+                )
+            else:
+                points2d, valid_mask = self.projector.projection(
+                    lidar_points_in_lidar_front,
+                    image_shape=image_shape,
+                    camera_matrix=camera_matrix,
+                    distortion_coeffs=distortion_coeffs,
+                    camera_to_lidar=camera_to_lidar
+                )
 
-            # if cam_name == 'CAM_FRONT':
+            # if cam_name == 'CAM_BACK':
             #     visualize_2d_points_mask(image, points2d, mask)
 
             # 分配语义标签
@@ -361,7 +533,8 @@ end_header
         """
         save_path = os.path.join(self.config['data_root'], 'dynamic_points', timestamp)
         all_dynamic_points = []
-        for cam_name in self.config['camera_types']:
+        camera_types = ["CAM_FRONT", "CAM_BACK", "CAM_LEFT", "CAM_RIGHT"]
+        for cam_name in camera_types:
             dynamic_points_path = os.path.join(save_path, cam_name)
             if not os.path.exists(dynamic_points_path):
                 continue
@@ -369,6 +542,7 @@ end_header
             for instance_id in instance_list:
                 dynamic_points_bin_path = os.path.join(dynamic_points_path, instance_id, "dense_points_processed.bin")
                 if not os.path.exists(dynamic_points_bin_path):
+                    continue
                     dynamic_points_bin_path = os.path.join(dynamic_points_path, instance_id, "dense_points_processed_fulfilled.bin")
                     if not os.path.exists(dynamic_points_bin_path):
                         continue
@@ -393,13 +567,12 @@ end_header
 
     def process_multi_frame(self):
         semantic_points = []
-        for i, timestamp in enumerate(self.timestamps):
+        for i, timestamp in enumerate(tqdm(self.timestamps)):
             lidar_points = self.load_lidar_pointcloud(timestamp,self.config['point_dim'])[:,:3]
 
             # 将点云从lidar坐标系转换到ego坐标系
             calib = self.get_calibration('lidar')
-            lidar_to_ego = self.projector.to_matrix4x4(calib['lidar2ego_rotation'],
-                                                    calib['lidar2ego_translation'])
+            lidar_to_ego = calib['lidar_to_ego']
             lidar_points_homo = self.projector.to_homo_coord(lidar_points)
             points_on_ego = lidar_points_homo @ lidar_to_ego.T
 
@@ -417,27 +590,47 @@ end_header
             current_pose = self.get_pose(timestamp)
             current_position = np.array(current_pose['translation'])
             current_quaternion = np.array(current_pose['rotation'])
-            cur_to_world = self.projector.to_matrix4x4(current_quaternion, current_position)
+            # pose文件中是lidar_front的pose，需要转换为ego的pose
+            lidar_to_world = self.projector.to_matrix4x4(current_quaternion, current_position)
+            # ego_to_world = lidar_to_world @ inv(lidar_to_ego)
+            ego_to_world = lidar_to_world @ np.linalg.inv(lidar_to_ego)
             
             points_homo = self.projector.to_homo_coord(coords)
-            p_in_world = (points_homo @ cur_to_world.T)[:, :3]
+            p_in_world = (points_homo @ ego_to_world.T)[:, :3]
             p_in_world = np.hstack((p_in_world, sem_point[:,3:]))
 
             semantic_points.append(p_in_world)
         
-        static_points = self.post_processor.full_point_process(semantic_points)
+        # static_points = self.post_processor.full_point_process(semantic_points)
+        static_points = np.vstack(semantic_points)
+
+        # save_path = "/home/robot/data/Autolabel/AUTOLABEL_0205/debug/clip0006/full_points_world.pcd"
+        # to_saved_points = np.vstack(static_points)
+        # bin_to_pcd(to_saved_points, save_path)
+        # input("------------------------ yeah")
+
+        # 获取dynamic_points目录下的所有timestamp文件夹
+        dynamic_points_dir = os.path.join(self.config['data_root'], 'dynamic_points')
+        if os.path.exists(dynamic_points_dir):
+            to_generated_timestamps = sorted([d for d in os.listdir(dynamic_points_dir) 
+                                             if os.path.isdir(os.path.join(dynamic_points_dir, d))])
+        else:
+            to_generated_timestamps = self.timestamps
+            print(f"Warning: dynamic_points directory not found at {dynamic_points_dir}, using self.timestamps instead")
         
         # 将全量点云转到每一帧的ego坐标系下并计算相应的Occupacy Voxel
-        for i, tp in enumerate(self.timestamps):
+        for i, tp in enumerate(to_generated_timestamps):
             ref_pose = self.get_pose(tp)
             ref_position = np.array(ref_pose['translation'])
             ref_quaternion = np.array(ref_pose['rotation'])
-            ref_to_world = self.projector.to_matrix4x4(ref_quaternion, ref_position)
+            # pose文件中是lidar_front的pose，需要转换为ego的pose
+            lidar_to_world = self.projector.to_matrix4x4(ref_quaternion, ref_position)
+            ego_to_world = lidar_to_world @ np.linalg.inv(lidar_to_ego)
 
             static_semantic_info = static_points[:, 3]
             static_points_xyz = static_points[:, :3]
             static_points_xyz_homo = self.projector.to_homo_coord(static_points_xyz)
-            transform_matrix = np.linalg.inv(ref_to_world)
+            transform_matrix = np.linalg.inv(ego_to_world)
             static_points_in_ego = static_points_xyz_homo @ transform_matrix.T[:, :3]
             static_semantic_points_full = np.hstack((static_points_in_ego, static_semantic_info.reshape(-1, 1)))
 
@@ -458,6 +651,10 @@ end_header
             final_points = self.post_processor.dynamic_points_denoise(final_points)
             # res = self.create_voxel_occupancy_slim(final_static_poinst)
             res =self.create_voxel_occupancy_dense(final_points)
+
+            # save_path2 = "/home/robot/data/Autolabel/AUTOLABEL_0205/debug/clip0006/occ_result.pcd"
+            # bin_to_pcd(res, save_path2)
+            # input("------------------------ yeah2")
 
             res = self.post_processor.calculate_free_unknown(res)
 

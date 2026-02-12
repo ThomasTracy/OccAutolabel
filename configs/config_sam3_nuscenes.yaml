@@ -1,14 +1,15 @@
 # 'data_root': "/home/jszr/Data/OCC_Autolabel/DATA/TOWN/clip1"
 # 'save_path': "/home/jszr/Data/OCC_Autolabel/DATA/TOWN/clip1/annotations/gt"
 
-'data_root': "/home/robot/data/clip0"
+# 'data_root': "/home/robot/data/Autolabel/map_converted"
+'data_root': "/home/robot/data/Autolabel/AUTOLABEL_hubian/clips_1_full"
 'save_path': "occ_gt"
 
 'label_map': "/home/robot/Code/Autolabel/occ_autolabel/configs/label_mapping_nuscenes.yaml"
 
-'camera_types': ["CAM_BACK","CAM_BACK_RIGHT","CAM_FRONT_LEFT","CAM_BACK_LEFT","CAM_FRONT","CAM_FRONT_RIGHT"]
+'camera_types': ["CAM_FRONT", "CAM_BACK"]
 
-'sensor_origin': [0,0,1] # ray cast 判断free unknown时射线发出的起点位置
+'sensor_origin': [0,0,0.5] # ray cast 判断free unknown时射线发出的起点位置
 
 'start_index': 0
 'end_index': 1
@@ -17,25 +18,33 @@ point_dim: 4
 point_multi_frame_num: 10
 multi_frame_radius: 100
 
-valid_voxel_point_threshold: 10
-valid_polygon_voxel_threshold: 2
+valid_voxel_point_threshold: 5
+valid_polygon_voxel_threshold: 5
 
 # 动态物体去噪
 dynamic_denoise_voxel_size: 0.3
 dynamic_denoise_dilate_radius: 2
 dynamic_denoise_ground_z_thresh: 0.4
 
+
+valid_dynamic_voxel_size: 10  # 若一个polygon中包含的动态物体的体素数量小于该阈值，删除这些动态物体（认为是噪声）
+valid_voxel_point_threshold_dynamic_filter: 5  # 用于动态物体筛选的有效体素点阈值
+dynamic_filter_voxel_size: 0.2  # 聚类筛选动态物体时的体素大小
+dynamic_ratio_threshold: 0.8  # 当当前聚类中包含动态物体的比例大于该阈值时，则认为该polygon中所有的点都是动态物体
+
 'downsample': False
 'voxel_size': 0.1
-'rough_voxel_size': 0.5  # 粗分辨率，用于去噪及聚类动态物体
+'rough_voxel_size': 0.2  # 粗分辨率，用于去噪及聚类动态物体
 
 'ground_mask_grid_size': 0.2  # 用来过滤噪点的BEV栅格大小
 'ground_height_threshold': 0.05  # 地面噪声点的高度阈值
 'std_multiplier': 3  # 过滤高于地面点很多的点的标准差乘数
 
+'ground_plane_height_threshold': 0.2  # 拟合地面平面后，低于这个高度的点认为是地面点
+
 # 'voxel_range':  [-50, -50, -1, 50, 50, 2] # [-8, -8, -1, 8, 8, 2]
-voxel_range: [-10, -15, -1, 20, 15, 2]
-'ego_range': [-1, -1, 3, 1]   # 扫到自车身上的点云范围 [x_min, y_min, x_max, y_max]
-'blind_floor_range': [-6,-6,-0.1, 6.5, 6, 0.1]  # 盲区地面的范围 [x_min, y_min, z_min, x_max, y_max, z_max]
+voxel_range: [-8, -8, -1, 8, 8, 2]
+'ego_range': [-0.5, -0.5, 0.5, 0.5]   # 扫到自车身上的点云范围 [x_min, y_min, x_max, y_max]
+'blind_floor_range': [-1,-1,-0.1, 1, 1, 0.1]  # 盲区地面的范围 [x_min, y_min, z_min, x_max, y_max, z_max]
 
 'debug_mode': False

@@ -3,6 +3,8 @@ import cv2
 from pyquaternion import Quaternion
 from scipy.spatial.transform import Rotation as R
 
+from tools.crop_partial_points import bin_to_pcd_xyz, bin_to_pcd
+
 
 class Projector:
     def __init__(self,
@@ -39,14 +41,29 @@ class Projector:
     def to_matrix4x4(self, rotation, translation=None):
         '''
         将旋转平移矩阵转换成4x4矩阵
+        
+        Args:
+            rotation: 旋转表示，支持三种格式：
+                - (3,) 欧拉角 [rx, ry, rz] (度数)
+                - (4,) 四元数 [w, x, y, z]
+                - (3, 3) 旋转矩阵
+            translation: 平移向量 (3,)
         '''
         # 注意此处输入的四元数是什么顺序，是[w, x, y, z]还是[x, y, z, w]
         # pyquatanion中，是[w, x, y, z]
         # scipy.spatial.transform.Rotation.from_quat 中是[x, y, z, w]
         if rotation.shape == (3,):
+            # 欧拉角转旋转矩阵
             rotation = R.from_euler('xyz', rotation, degrees=True).as_matrix()
         elif rotation.shape == (4,):
+            # 四元数转旋转矩阵
             rotation = Quaternion(rotation).rotation_matrix
+        elif rotation.shape == (3, 3):
+            # 已经是旋转矩阵，直接使用
+            pass
+        else:
+            raise ValueError(f"Unsupported rotation shape: {rotation.shape}. Expected (3,), (4,), or (3, 3)")
+        
         transformation_matrix = np.eye(4)
         transformation_matrix[:3, :3] = rotation
         transformation_matrix[:3, 3] = translation
@@ -245,6 +262,80 @@ class Projector:
                         (points_on_image[:,0] > 0) & (points_on_image[:,0] < image_shape[0]) & \
                         (points_on_image[:,1] > 0) & (points_on_image[:,1] < image_shape[1])
             points_on_image = points_on_image[valid_mask]
+        return points_on_image, valid_mask
+
+
+    def projection_fisheye(self, points_3d, 
+                           image_shape=None,
+                           camera_matrix=None,
+                           distortion_coeffs=None,
+                           camera_to_lidar=None):
+        """
+        鱼眼相机投影方法
+        使用 cv2.fisheye 模块处理鱼眼相机的畸变模型
+        
+        Args:
+            points_3d: 3D点云 (N, 3) 或 (N, 4), lidar坐标系下
+            image_shape: 图像尺寸 [width, height]
+            camera_matrix: 相机内参矩阵 (3, 3)
+            distortion_coeffs: 鱼眼相机畸变系数 (4,) [k1, k2, k3, k4]
+            camera_to_lidar: 相机到lidar的变换矩阵 (4, 4)
+            
+        Returns:
+            points_on_image: 投影后的2D点 (M, 2)
+            valid_mask: 有效点的mask (N,)
+        """
+        points_3d = points_3d[:, :3]
+        points_homo = np.hstack((points_3d, np.ones((points_3d.shape[0], 1))))
+        
+        # 处理默认参数
+        if camera_to_lidar is None:
+            camera_to_lidar = np.eye(4)
+
+        # lidar 坐标系到 camera 坐标系
+        # 需要求逆: lidar_to_camera = inv(camera_to_lidar)
+        lidar_to_camera = np.linalg.inv(camera_to_lidar)
+        points_on_cam_coord = points_homo @ lidar_to_camera.T
+        points_xyz = points_on_cam_coord[:, :3]
+
+        # 使用鱼眼相机模型投影
+        if distortion_coeffs is not None and len(distortion_coeffs) == 4:
+            # 鱼眼相机投影
+            # cv2.fisheye.projectPoints 需要输入 (N, 1, 3) 的点
+            points_xyz_reshaped = points_xyz.reshape(-1, 1, 3).astype(np.float64)
+            
+            # 鱼眼相机畸变系数需要 (4, 1) 的形状
+            distortion_coeffs_fisheye = np.array(distortion_coeffs).reshape(4, 1).astype(np.float64)
+            camera_matrix_fisheye = camera_matrix.astype(np.float64)
+            
+            # 使用 cv2.fisheye.projectPoints
+            projected, _ = cv2.fisheye.projectPoints(
+                points_xyz_reshaped,
+                np.zeros(3),  # rvec (旋转向量，这里为0因为点已经在相机坐标系)
+                np.zeros(3),  # tvec (平移向量，这里为0)
+                camera_matrix_fisheye,
+                distortion_coeffs_fisheye
+            )
+            
+            # 转换输出形状 (N, 1, 2) -> (N, 2)
+            points_on_image = projected.reshape(-1, 2)
+        else:
+            # 无畸变或非鱼眼畸变，使用标准针孔模型
+            points_on_image = (camera_matrix @ points_xyz.T).T
+            points_on_image[:, 0] /= (points_on_image[:, 2] + 1e-6)
+            points_on_image[:, 1] /= (points_on_image[:, 2] + 1e-6)
+            points_on_image = points_on_image[:, :2]
+
+        # 筛选有效点，在相机前方，在图像内
+        if image_shape is not None:
+            valid_mask = (points_xyz[:, 2] > 0) & \
+                        (points_on_image[:, 0] >= 0) & (points_on_image[:, 0] < image_shape[0]) & \
+                        (points_on_image[:, 1] >= 0) & (points_on_image[:, 1] < image_shape[1])
+            points_on_image = points_on_image[valid_mask]
+        else:
+            valid_mask = points_xyz[:, 2] > 0
+            points_on_image = points_on_image[valid_mask]
+
         return points_on_image, valid_mask
 
 

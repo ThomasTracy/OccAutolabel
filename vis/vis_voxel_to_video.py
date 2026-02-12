@@ -120,11 +120,11 @@ def get_scene_bounds(geometries):
     
     return min_bound, max_bound
 def setup_camera_45_degree_view(vis):
-    # 设置相机位置
-    camera_pos = np.array([10, 0, -10])
+    # 设置相机位置：原点后10米，上方10米
+    camera_pos = np.array([40, 0, -20])
     
-    # 计算lookat点（场景中心）
-    lookat_point = np.array([-10, 0, 0])
+    # 计算lookat点（场景中心，即原点）
+    lookat_point = np.array([0, 0, 0])
     
     # 设置相机参数
     ctr = vis.get_view_control()
@@ -137,7 +137,7 @@ def setup_camera_45_degree_view(vis):
     ctr.set_lookat(lookat_point)
     ctr.set_up([0, 0, 1])  # Z轴向上
     ctr.set_front(front_vector)
-    ctr.set_zoom(0.1)  # 可以根据需要调整缩放级别
+    ctr.set_zoom(0.6)  # 可以根据需要调整缩放级别
     
     return ctr
 
@@ -163,18 +163,22 @@ def setup_camera_top_view(vis):
     
     return ctr
 
-def render_frame(vis, geometries, output_path, width=1200, height=800):
+def render_frame(vis, geometries, output_path, width=1920, height=1080):
     """
     渲染当前帧并保存为图像
     """
     try:
+        # 设置背景颜色为黑色
+        render_option = vis.get_render_option()
+        render_option.background_color = np.array([0, 0, 0])  # 黑色背景
+        
         # 更新几何体
         for geom in geometries:
             vis.update_geometry(geom)
         
         # 设置视角
-        # setup_camera_45_degree_view(vis)
-        setup_camera_top_view(vis)
+        setup_camera_45_degree_view(vis)
+        # setup_camera_top_view(vis)
         
         # 更新渲染器
         vis.poll_events()
@@ -220,7 +224,7 @@ def create_video_from_frames(frame_folder, output_video_path, fps=30):
     video_writer.release()
     print(f"视频已保存至: {output_video_path}")
 
-def visualize_voxels_multiframe(voxel_data_list, voxel_name_list, colors, voxel_size, output_dir="./frames", video_output="./voxel_video.mp4", fps=5):
+def visualize_voxels_multiframe(voxel_data_list, voxel_name_list, colors, voxel_size, output_dir="./frames", video_output="./voxel_video.mp4", fps=10):
     """
     可视化多帧体素数据并生成视频
     
@@ -237,7 +241,11 @@ def visualize_voxels_multiframe(voxel_data_list, voxel_name_list, colors, voxel_
     
     # 创建可视化窗口
     vis = o3d.visualization.Visualizer()
-    vis.create_window(width=1200, height=800, visible=False)  # 设置为不可见以提高性能
+    vis.create_window(width=1920, height=1080, visible=False)  # 设置为不可见以提高性能
+    
+    # 设置背景颜色为黑色
+    render_option = vis.get_render_option()
+    render_option.background_color = np.array([0, 0, 0])  # 黑色背景
     
     frames_data = []
     
@@ -281,6 +289,12 @@ def visualize_voxels_multiframe(voxel_data_list, voxel_name_list, colors, voxel_
         voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd, voxel_size=voxel_size)
         bounding_lines = create_voxel_bound_lines(voxel_grid)
         
+        # 创建坐标轴（放大并加粗）
+        coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+            size=3.0,  # 放大坐标轴尺寸
+            origin=[0, 0, 0]
+        )
+        
         # 清空之前的几何体
         if i > 0:
             vis.clear_geometries()
@@ -288,6 +302,7 @@ def visualize_voxels_multiframe(voxel_data_list, voxel_name_list, colors, voxel_
         # 添加当前帧的几何体
         vis.add_geometry(voxel_grid)
         vis.add_geometry(bounding_lines)
+        vis.add_geometry(coordinate_frame)
         
         # 更新渲染
         vis.poll_events()
@@ -295,9 +310,9 @@ def visualize_voxels_multiframe(voxel_data_list, voxel_name_list, colors, voxel_
         
         # 渲染并保存当前帧
         frame_path = os.path.join(output_dir, "{}.png".format(voxel_name_list[i]))
-        render_frame(vis, [voxel_grid, bounding_lines], frame_path)
+        render_frame(vis, [voxel_grid, bounding_lines, coordinate_frame], frame_path)
         
-        frames_data.append((voxel_grid, bounding_lines))
+        frames_data.append((voxel_grid, bounding_lines, coordinate_frame))
     
     # 关闭可视化窗口
     vis.destroy_window()
@@ -342,10 +357,16 @@ def visualize_voxels_single_frame(voxel_data, colors, voxel_size):
     voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd, voxel_size=voxel_size)
     bounding_lines = create_voxel_bound_lines(voxel_grid)
     
-    o3d.visualization.draw_geometries([voxel_grid, bounding_lines], 
+    # 创建坐标轴（放大并加粗）
+    coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+        size=15.0,  # 放大坐标轴尺寸
+        origin=[0, 0, 0]
+    )
+    
+    o3d.visualization.draw_geometries([voxel_grid, bounding_lines, coordinate_frame], 
                                      window_name="Voxel Visualization",
-                                     width=1200, 
-                                     height=800)
+                                     width=1920, 
+                                     height=1080)
 
 def vis_voxel_multiframe(voxel_files, output_root):
     """
@@ -388,7 +409,7 @@ def vis_voxel(voxel_file):
     """
     单帧可视化（保持原有功能）
     """
-    voxel_size = 0.2
+    voxel_size = 0.1
     class_num = 6
     colors = generate_uniform_colors_rgb(class_num)
     colors = np.array(colors).astype(np.uint8)
@@ -416,11 +437,11 @@ if __name__ == "__main__":
     # output_dir = '/home/robot/data/debug/clip0000/vis_result'
     # main(input_dir, output_dir)
 
-    multi_clip_root = '/home/robot/data/clip0'
+    multi_clip_root = '/home/robot/data/Autolabel/AUTOLABEL_hubian/clips_1_full'
     clips = os.listdir(multi_clip_root)
     for clip in clips:
         input_dir = os.path.join(multi_clip_root, clip, 'occ_gt')
-        output_dir = os.path.join(multi_clip_root, clip, 'vis_result')
+        output_dir = os.path.join(multi_clip_root, clip, 'vis_result_cars')
         main(input_dir, output_dir)
 
     # 单帧可视化
