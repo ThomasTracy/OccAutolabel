@@ -1084,7 +1084,7 @@ class PostProcessor(Processor):
         
         # if len(vis_points) > 0:
         #     vis_points_array = np.array(vis_points)
-        #     vis_save_path = "/home/robot/data/Autolabel/ZG_AUTOLABEL/clusters_visualization.pcd"
+        #     vis_save_path = "/home/robot/data/Autolabel/Henan_dianzhan/test/clusters_vis.pcd"
         #     bin_to_pcd(vis_points_array, vis_save_path)
         #     print(f"✅ 聚类可视化保存至: {vis_save_path}")
         #     print(f"   - 总聚类数: {len(clusters)}")
@@ -1345,7 +1345,8 @@ class PostProcessor(Processor):
 
         # messi
         # static_and_dynamic_points = self.filter_dynamic_objects(non_ground_points)
-        static_and_dynamic_points = self.filter_dynamic_objects(non_ground_points)
+        # static_and_dynamic_points = self.filter_dynamic_objects(non_ground_points)
+        static_and_dynamic_points = non_ground_points
         # save_path = "/home/robot/data/Autolabel/AUTOLABEL_yuanqv_0208/debug/clip0004/dynamic_static.pcd"
         # bin_to_pcd(static_and_dynamic_points, save_path)
         # input("~~~~~~~~~~~~~~~~~")

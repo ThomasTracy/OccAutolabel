@@ -1,6 +1,7 @@
 import os
 import glob
 import re
+from collections import defaultdict, deque
 import cv2
 import yaml
 import numpy as np
@@ -390,7 +391,191 @@ end_header
         
         return semantics
 
+    def _dynamic_refine_cfg(self):
+        """动态物点筛选参数。"""
+        def _cfg(key, default):
+            return self.config[key] if key in self.config else default
+
+        voxel_size = _cfg('dynamic_refine_voxel_size', [0.4, 0.4, 0.4])
+        if isinstance(voxel_size, (int, float)):
+            voxel_size = np.array([float(voxel_size)] * 3, dtype=np.float32)
+        else:
+            voxel_size = np.array(voxel_size, dtype=np.float32)
+            if voxel_size.shape[0] != 3:
+                voxel_size = np.array([0.4, 0.4, 0.4], dtype=np.float32)
+
+        return {
+            'enable': _cfg('dynamic_refine_enable', True),
+            'dynamic_labels': set(_cfg('dynamic_refine_labels', [Category.VEHICLE.value, Category.PEOPLE.value])),
+            'voxel_size': voxel_size,
+            'connectivity': int(_cfg('dynamic_refine_connectivity', 26)),
+            'max_center_dist': float(_cfg('dynamic_refine_max_center_distance', 8.0)),
+            'min_cluster_points': int(_cfg('dynamic_refine_min_cluster_points', 20)),
+            'polygon_z_margin': float(_cfg('dynamic_refine_polygon_z_margin', 0.5)),
+            'fill_label': int(_cfg('dynamic_refine_fill_label', Category.VEHICLE.value)),
+        }
+
+    def _region_grow_voxels(self, occupied_voxels, seed_voxel, seed_center, voxel_size, connectivity, max_center_dist):
+        """体素区域增长，并限制增长体素距离动态中心不能过远。"""
+        if connectivity == 6:
+            neighbors = [
+                (1, 0, 0), (-1, 0, 0),
+                (0, 1, 0), (0, -1, 0),
+                (0, 0, 1), (0, 0, -1),
+            ]
+        else:
+            neighbors = [
+                (dx, dy, dz)
+                for dx in (-1, 0, 1)
+                for dy in (-1, 0, 1)
+                for dz in (-1, 0, 1)
+                if not (dx == 0 and dy == 0 and dz == 0)
+            ]
+
+        cluster = set([seed_voxel])
+        q = deque([seed_voxel])
+
+        while q:
+            vx, vy, vz = q.popleft()
+            for dx, dy, dz in neighbors:
+                nv = (vx + dx, vy + dy, vz + dz)
+                if nv in cluster or nv not in occupied_voxels:
+                    continue
+
+                nv_center = (np.array(nv, dtype=np.float32) + 0.5) * voxel_size
+                if np.linalg.norm(nv_center - seed_center) > max_center_dist:
+                    continue
+
+                cluster.add(nv)
+                q.append(nv)
+
+        return cluster
+
+    def refine_dynamic_points_after_semantic(self, semantic_points):
+        """
+        动态物点筛选：
+        1) 体素化点云 + 区域增长聚类动态物体；
+        2) 将聚类 polygon 内的点都设为动态点；
+        3) 增长体素到动态中心的距离受阈值限制。
+        """
+        cfg = self._dynamic_refine_cfg()
+        if (not cfg['enable']) or semantic_points.shape[0] == 0:
+            return semantic_points
+
+        pts = semantic_points[:, :3]
+        labels = semantic_points[:, 3].astype(np.int32)
+        seed_mask = np.isin(labels, list(cfg['dynamic_labels']))
+        if seed_mask.sum() == 0:
+            return semantic_points
+
+        voxel_size = cfg['voxel_size']
+        voxel_idx = np.floor(pts / voxel_size).astype(np.int32)
+
+        voxel_to_indices = defaultdict(list)
+        for i, v in enumerate(voxel_idx):
+            voxel_to_indices[(int(v[0]), int(v[1]), int(v[2]))].append(i)
+        occupied_voxels = set(voxel_to_indices.keys())
+
+        seed_voxels = sorted(set((int(v[0]), int(v[1]), int(v[2])) for v in voxel_idx[seed_mask]))
+
+        refined_dynamic_mask = seed_mask.copy()
+        visited_seed = set()
+
+        xy_all = pts[:, :2].astype(np.float32)
+
+        for sv in seed_voxels:
+            if sv in visited_seed:
+                continue
+
+            sv_indices = voxel_to_indices.get(sv, [])
+            sv_dyn = [i for i in sv_indices if seed_mask[i]]
+            if len(sv_dyn) == 0:
+                continue
+
+            seed_center = pts[sv_dyn, :3].mean(axis=0)
+            cluster_voxels = self._region_grow_voxels(
+                occupied_voxels=occupied_voxels,
+                seed_voxel=sv,
+                seed_center=seed_center,
+                voxel_size=voxel_size,
+                connectivity=cfg['connectivity'],
+                max_center_dist=cfg['max_center_dist'],
+            )
+            visited_seed.update(cluster_voxels)
+
+            cluster_indices = []
+            for v in cluster_voxels:
+                cluster_indices.extend(voxel_to_indices.get(v, []))
+            if len(cluster_indices) < cfg['min_cluster_points']:
+                continue
+
+            cluster_pts = pts[cluster_indices]
+            z_min = cluster_pts[:, 2].min() - cfg['polygon_z_margin']
+            z_max = cluster_pts[:, 2].max() + cfg['polygon_z_margin']
+
+            hull = cv2.convexHull(cluster_pts[:, :2].astype(np.float32))
+            if hull is None or len(hull) < 3:
+                refined_dynamic_mask[cluster_indices] = True
+                continue
+
+            candidate_indices = np.where((pts[:, 2] >= z_min) & (pts[:, 2] <= z_max))[0]
+            center_xy = seed_center[:2]
+
+            for idx in candidate_indices:
+                pxy = xy_all[idx]
+                if np.linalg.norm(pxy - center_xy) > cfg['max_center_dist']:
+                    continue
+                inside = cv2.pointPolygonTest(hull, (float(pxy[0]), float(pxy[1])), False)
+                if inside >= 0:
+                    refined_dynamic_mask[idx] = True
+
+        refined = semantic_points.copy()
+        refined[refined_dynamic_mask, 3] = cfg['fill_label']
+        return refined
+
     
+    def dilate_dynamic_mask(self, mask, dilate_pixels=10, dynamic_labels=None):
+        """
+        对mask中动态物体区域进行膨胀处理
+        
+        Args:
+            mask: 语义分割mask
+            dilate_pixels: 膨胀的像素大小
+            dynamic_labels: 动态物体标签列表，默认为[VEHICLE, PEOPLE]
+        
+        Returns:
+            np.array: 膨胀处理后的mask
+        """
+        if dynamic_labels is None:
+            dynamic_labels = [Category.VEHICLE.value, Category.PEOPLE.value]
+        
+        if dilate_pixels <= 0:
+            return mask
+        
+        # 创建膨胀核
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_pixels * 2 + 1, dilate_pixels * 2 + 1))
+        
+        # 复制mask用于修改
+        dilated_mask = mask.copy()
+        
+        # 对每个动态物体标签进行膨胀处理
+        for label in dynamic_labels:
+            # 创建当前标签的二值mask
+            binary_mask = (mask == label).astype(np.uint8)
+            
+            if binary_mask.sum() == 0:
+                continue
+            
+            # 膨胀二值mask
+            dilated_binary = cv2.dilate(binary_mask, kernel, iterations=1)
+            
+            # 只在原本非动态物体的区域更新为当前动态标签
+            # 避免覆盖其他动态物体或已有的更高优先级标签
+            update_mask = (dilated_binary == 1) & (~np.isin(mask, dynamic_labels))
+            dilated_mask[update_mask] = label
+        
+        return dilated_mask
+
     def assgin_semantic_from_image(self, timestamp, lidar_points=None):
         """
         通过点云向图片的投影, 将图像分割的mask语义赋予点云
@@ -408,6 +593,9 @@ end_header
         semantic_points = np.zeros((lidar_points.shape[0], 4))
         semantic_points[:, :3] = lidar_points[:, :3]  # 坐标
         semantic_points[:, 3] = Category.STATIC_OBJECT.value  # 默认语义标签
+        
+        # 获取动态物体mask膨胀参数
+        dilate_pixels = self.config.get('dynamic_mask_dilate_pixels', 10)
         
         # 处理每个相机
         camera_names = self.config['camera_types']
@@ -427,6 +615,9 @@ end_header
             # input("-----------")
             image = self.load_camera_image(image_timestamp, cam_name)
             mask = self.load_semantic_mask(self.mask_path, image_timestamp, cam_name)
+            
+            # 对动态物体区域进行膨胀处理
+            mask = self.dilate_dynamic_mask(mask, dilate_pixels=dilate_pixels)
             
             cam_calib = self.get_calibration(cam_name)
             camera_matrix = cam_calib.get('camera_intrinsic', None)
@@ -582,6 +773,9 @@ end_header
             # -------------------------------------- 赋予点云语义 --------------------------------------
             sem_point = self.assgin_semantic_from_image(timestamp, points_without_ego)
 
+            # -------------------------------------- 动态物点筛选（体素化+区域增长+polygon） --------------------------------------
+            sem_point = self.refine_dynamic_points_after_semantic(sem_point)
+
             # -------------------------------------- 地面盲区赋值地面语义 --------------------------------------
             sem_point = self.pre_processor.redefine_blind_floor_points(sem_point)
 
@@ -618,6 +812,12 @@ end_header
             to_generated_timestamps = self.timestamps
             print(f"Warning: dynamic_points directory not found at {dynamic_points_dir}, using self.timestamps instead")
         
+        # 如果存在timestamp.txt文件，则只处理其中列出的时间戳对应的帧
+        if self.config['target_timestamp_list_path'] is not None:
+            with open(self.config['target_timestamp_list_path'], 'r') as f:
+                to_generated_timestamps = [line.strip() for line in f.readlines()]
+            print(f"Using target timestamps from {self.config['target_timestamp_list_path']}, total {len(to_generated_timestamps)} frames to process")
+
         # 将全量点云转到每一帧的ego坐标系下并计算相应的Occupacy Voxel
         for i, tp in enumerate(to_generated_timestamps):
             ref_pose = self.get_pose(tp)

@@ -2,8 +2,10 @@
 # 'save_path': "/home/jszr/Data/OCC_Autolabel/DATA/TOWN/clip1/annotations/gt"
 
 # 'data_root': "/home/robot/data/Autolabel/map_converted"
-'data_root': "/home/robot/data/Autolabel/AUTOLABEL_hubian/clips_1_full"
+'data_root': "/home/robot/data/Autolabel/Henan_dianzhan/clips_800"
 'save_path': "occ_gt"
+
+'target_timestamp_list_path': "/home/robot/data/Autolabel/Henan_dianzhan/timestamps.txt"
 
 'label_map': "/home/robot/Code/Autolabel/occ_autolabel/configs/label_mapping_nuscenes.yaml"
 
@@ -31,6 +33,16 @@ valid_dynamic_voxel_size: 10  # 若一个polygon中包含的动态物体的体�
 valid_voxel_point_threshold_dynamic_filter: 5  # 用于动态物体筛选的有效体素点阈值
 dynamic_filter_voxel_size: 0.2  # 聚类筛选动态物体时的体素大小
 dynamic_ratio_threshold: 0.8  # 当当前聚类中包含动态物体的比例大于该阈值时，则认为该polygon中所有的点都是动态物体
+
+# 动态物点筛选（赋予语义后）
+dynamic_refine_enable: True
+dynamic_refine_labels: [1, 2]  # 已知动态标签（车辆/行人）
+dynamic_refine_voxel_size: [0.1, 0.1, 0.1]  # 体素化尺寸
+dynamic_refine_connectivity: 26  # 区域增长连通性：6 或 26
+dynamic_refine_max_center_distance: 1.0  # 增长体素与动态中心最大距离阈值（米）
+dynamic_refine_min_cluster_points: 2  # 最小聚类点数
+dynamic_refine_polygon_z_margin: 2  # polygon扩张时的高度容忍（米）
+dynamic_refine_fill_label: 1  # polygon内补点后的动态标签
 
 'downsample': False
 'voxel_size': 0.1
