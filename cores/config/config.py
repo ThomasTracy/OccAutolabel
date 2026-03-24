@@ -71,3 +71,7 @@ class Config:
     def __contains__(self, key: str) -> bool:
         """支持 in 运算符"""
         return key in self._config
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        """支持 get 方法，键不存在时返回默认值"""
+        return self._config.get(key, default)
